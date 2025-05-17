@@ -297,7 +297,7 @@ if __name__ == "__main__":
     SVG_DIRECTORY = '/Users/varun_jagannath/Documents/D/svg_downloader/' # ADJUST
     # SVG_PATTERN = "full_svg_clean_repo/twemoji*/*.svg"                 # ADJUST
     SVG_PATTERN = "full_svg_clean_repo/twemoji*/*.svg" # Smaller pattern for testing
-    PRECOMPUTED_OUTPUT_FILE = "optimized_progressive_dataset_precomputed_v1.pt"
+    PRECOMPUTED_OUTPUT_FILE = "optimized_progressive_dataset_precomputed_v2.pt"
     MAX_SEQ_LENGTH_DATASET = 1024 # Max length for padding in __getitem__
     # --- END CONFIGURATION ---
 
@@ -355,15 +355,20 @@ if __name__ == "__main__":
     cmd_seq_idx_max = getattr(svg_tensor_converter, 'cmd_seq_idx_max', 100.0) # Tau max (example)
 
     # Assuming svg_tensor_converter._normalize exists and is the one used internally
-    norm_sos_elem = svg_tensor_converter._normalize(svg_tensor_converter.ELEMENT_TYPES['<BOS>'], element_min, element_max)
-    norm_eos_elem = svg_tensor_converter._normalize(svg_tensor_converter.ELEMENT_TYPES['<EOS>'], element_min, element_max)
-    norm_pad_elem = svg_tensor_converter._normalize(svg_tensor_converter.ELEMENT_TYPES['<PAD>'], element_min, element_max)
+    #norm_sos_elem = svg_tensor_converter._normalize(svg_tensor_converter.ELEMENT_TYPES['<BOS>'], element_min, element_max)
+    norm_sos_elem = svg_tensor_converter.ELEMENT_TYPES['<BOS>']
+    #norm_eos_elem = svg_tensor_converter._normalize(svg_tensor_converter.ELEMENT_TYPES['<EOS>'], element_min, element_max)
+    norm_eos_elem = svg_tensor_converter.ELEMENT_TYPES['<EOS>']
+    #norm_pad_elem = svg_tensor_converter._normalize(svg_tensor_converter.ELEMENT_TYPES['<PAD>'], element_min, element_max)
+    norm_pad_elem = svg_tensor_converter.ELEMENT_TYPES['<PAD>']
     
     # cmd_seq_idx (tau) for SOS/EOS/PAD is 0, normalize it
-    norm_zero_cmd_seq = svg_tensor_converter._normalize(0.0, cmd_seq_idx_min, cmd_seq_idx_max)
+    #norm_zero_cmd_seq = svg_tensor_converter._normalize(0.0, cmd_seq_idx_min, cmd_seq_idx_max)
+    norm_zero_cmd_seq = 0.0
     
     # cmd_type_idx for SOS/EOS/PAD is NO_CMD, normalize it
-    norm_no_cmd_type = svg_tensor_converter._normalize(svg_tensor_converter.PATH_COMMAND_TYPES['NO_CMD'], cmd_type_min, cmd_type_max)
+    #norm_no_cmd_type = svg_tensor_converter._normalize(svg_tensor_converter.PATH_COMMAND_TYPES['NO_CMD'], cmd_type_min, cmd_type_max)
+    norm_no_cmd_type = svg_tensor_converter.PATH_COMMAND_TYPES['NO_CMD']
 
     default_params = torch.full((svg_tensor_converter.num_geom_params + svg_tensor_converter.num_fill_style_params,),
                                 svg_tensor_converter.DEFAULT_PARAM_VAL, dtype=torch.float32)
@@ -420,15 +425,15 @@ if __name__ == "__main__":
             #print(attention_mask[1, :5])
             #print(attention_mask[2, :5])
 
-            # if i == 0: # Print details for the first batch only
-            #     print("Example SVG Matrix (Batch 0, Item 0, Rows 0-5):")
-            #     print(svg_matrices[0, :50, :])
-            #     print("Example Pixel Embedding (Batch 0, Item 0, Rows 0-5, Cols 0-5):")
-            #     print(pixel_embeddings[0, :50, :5])
-            #     print("Example Attention Mask (Batch 0, Item 0, Rows 0-5):")
-            #     print(attention_mask[0, :5])
-            #if i >= 1: # Test a couple of batches
-            #    break
+            if i == 0: # Print details for the first batch only
+                print("Example SVG Matrix (Batch 0, Item 0, Rows 0-5):")
+                print(svg_matrices[0, :50, :])
+                print("Example Pixel Embedding (Batch 0, Item 0, Rows 0-5, Cols 0-5):")
+                print(pixel_embeddings[0, :50, :5])
+                print("Example Attention Mask (Batch 0, Item 0, Rows 0-5):")
+                print(attention_mask[0, :5])
+            if i >= 1: # Test a couple of batches
+               break
         print("\nDataLoader test successful with DynamicProgressiveSVGDataset.")
     except Exception as e:
          print(f"\nError during DataLoader test:")
