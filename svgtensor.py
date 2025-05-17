@@ -262,8 +262,8 @@ class SVGToTensor_Normalized:
 
         value_clamped = max(val_min, min(value, val_max)) # Clamp to original range
         norm_0_1 = (value_clamped - val_min) / (val_max - val_min)
-        #return norm_0_1 * (self.target_norm_max - self.target_norm_min) + self.target_norm_min
-        return value
+        return norm_0_1 * (self.target_norm_max - self.target_norm_min) + self.target_norm_min
+        #return value
 
     def _get_fill_style_params_normalized(self, style_data):
         """Normalizes fill color (RGB) and fill opacity (A) parameters."""
@@ -302,11 +302,11 @@ class SVGToTensor_Normalized:
         style_data = element_data.get('style', {})
 
         element_rho_idx = self.ELEMENT_TYPES.get(element_type_str, self.PAD_ELEMENT_IDX)
-        element_rho_norm = self._normalize(
-                                element_rho_idx,
-                                min(self.ELEMENT_TYPES.values()),
-                                max(self.ELEMENT_TYPES.values())
-                            )
+        # element_rho_norm = self._normalize(
+        #                         element_rho_idx,
+        #                         min(self.ELEMENT_TYPES.values()),
+        #                         max(self.ELEMENT_TYPES.values())
+        #                     )
         if element_rho_idx == self.PAD_ELEMENT_IDX and element_type_str not in ['<BOS>', '<EOS>', '<PAD>']:
             return None # Skip unknown element types
 
@@ -323,11 +323,11 @@ class SVGToTensor_Normalized:
                 
                 cmd_char = cmd_dict['command']
                 cmd_code = self.PATH_COMMAND_TYPES.get(cmd_char.lower(), self.NO_CMD_IDX)
-                cmd_code_norm = self._normalize(
-                                        cmd_code,
-                                        min(self.PATH_COMMAND_TYPES.values()),
-                                        max(self.PATH_COMMAND_TYPES.values())
-                                    )
+                # cmd_code_norm = self._normalize(
+                #                         cmd_code,
+                #                         min(self.PATH_COMMAND_TYPES.values()),
+                #                         max(self.PATH_COMMAND_TYPES.values())
+                #                     )
                 raw_values = cmd_dict.get('values', [])
                 
                 # µ₀, ν₀ = start point of the current segment (current_x, current_y before this command)
@@ -430,7 +430,7 @@ class SVGToTensor_Normalized:
                 current_x, current_y = next_x, next_y
                 
                 cmd_seq_idx = torch.tensor([1], dtype=torch.float32)
-                indices = torch.tensor([element_rho_norm,  cmd_code_norm], dtype=torch.float32)
+                indices = torch.tensor([element_rho_idx,  cmd_code], dtype=torch.float32)
                 current_row = torch.cat((indices, geom_params_norm, fill_style_params_norm, cmd_seq_idx))
                 sequence_rows.append(current_row)
 
@@ -445,11 +445,11 @@ class SVGToTensor_Normalized:
 
             if element_type_str == 'rect':
                 cmd_code = self.PATH_COMMAND_TYPES['RECT']
-                cmd_code_norm = self._normalize(
-                                        cmd_code,
-                                        min(self.PATH_COMMAND_TYPES.values()),
-                                        max(self.PATH_COMMAND_TYPES.values())
-                                    )
+                # cmd_code_norm = self._normalize(
+                #                         cmd_code,
+                #                         min(self.PATH_COMMAND_TYPES.values()),
+                #                         max(self.PATH_COMMAND_TYPES.values())
+                #                     )
                 # µ₀,ν₀ = x,y; µ₁,ν₁ = rx,ry; µ₂,ν₂ = width,height
                 geom_params_norm[0] = self._normalize(attrs.get('x', 0.0), self.COORD_MIN, self.COORD_MAX)
                 geom_params_norm[1] = self._normalize(attrs.get('y', 0.0), self.COORD_MIN, self.COORD_MAX)
@@ -459,22 +459,22 @@ class SVGToTensor_Normalized:
                 geom_params_norm[5] = self._normalize(attrs.get('height', 0.0), self.RADIUS_MIN, self.RADIUS_MAX)
             elif element_type_str == 'circle':
                 cmd_code = self.PATH_COMMAND_TYPES['CIRCLE']
-                cmd_code_norm = self._normalize(
-                                        cmd_code,
-                                        min(self.PATH_COMMAND_TYPES.values()),
-                                        max(self.PATH_COMMAND_TYPES.values())
-                                    )
+                # cmd_code_norm = self._normalize(
+                #                         cmd_code,
+                #                         min(self.PATH_COMMAND_TYPES.values()),
+                #                         max(self.PATH_COMMAND_TYPES.values())
+                #                     )
                 # µ₀,ν₀ = cx,cy; µ₁ = r
                 geom_params_norm[0] = self._normalize(attrs.get('cx', 0.0), self.COORD_MIN, self.COORD_MAX)
                 geom_params_norm[1] = self._normalize(attrs.get('cy', 0.0), self.COORD_MIN, self.COORD_MAX)
                 geom_params_norm[2] = self._normalize(attrs.get('r', 0.0), self.RADIUS_MIN, self.RADIUS_MAX) 
             elif element_type_str == 'ellipse':
                 cmd_code = self.PATH_COMMAND_TYPES['ELLIPSE']
-                cmd_code_norm = self._normalize(
-                                        cmd_code,
-                                        min(self.PATH_COMMAND_TYPES.values()),
-                                        max(self.PATH_COMMAND_TYPES.values())
-                                    )
+                # cmd_code_norm = self._normalize(
+                #                         cmd_code,
+                #                         min(self.PATH_COMMAND_TYPES.values()),
+                #                         max(self.PATH_COMMAND_TYPES.values())
+                #                     )
                 # µ₀,ν₀ = cx,cy; µ₁,ν₁ = rx,ry
                 geom_params_norm[0] = self._normalize(attrs.get('cx', 0.0), self.COORD_MIN, self.COORD_MAX)
                 geom_params_norm[1] = self._normalize(attrs.get('cy', 0.0), self.COORD_MIN, self.COORD_MAX)
@@ -482,7 +482,7 @@ class SVGToTensor_Normalized:
                 geom_params_norm[3] = self._normalize(attrs.get('ry', 0.0), self.RADIUS_MIN, self.RADIUS_MAX)
             
             cmd_seq_idx = torch.tensor([1], dtype=torch.float32)
-            indices = torch.tensor([element_rho_norm,  cmd_code_norm], dtype=torch.float32)
+            indices = torch.tensor([element_rho_idx,  cmd_code], dtype=torch.float32)
             current_row = torch.cat((indices, geom_params_norm, fill_style_params_norm, cmd_seq_idx))
             sequence_rows.append(current_row)
         
