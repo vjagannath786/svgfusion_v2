@@ -9,239 +9,24 @@ from sklearn.manifold import TSNE # For t-SNE if used
 import matplotlib.pyplot as plt # For t-SNE if used
 import traceback # For detailed errors
 
+
 # Ensure sys.path is set if svgutils is not in standard locations
 import sys
 import random
-sys.path.append("/home/")
+sys.path.append(".")
 
 try:
     from models import VPVAE # Your trained model class
-    from svgutils import SVGToTensor_Normalized # For de-norm params and vocabs
+    from svgutils import SVGToTensor_Normalized, tensor_to_svg_file_hybrid_wrapper # For de-norm params and vocabs
     print("Successfully imported VPVAE and SVGToTensor_Normalized.")
 except ImportError as e:
     print(f"CRITICAL ERROR importing VPVAE or SVGToTensor_Normalized: {e}")
     sys.exit(1)
 
 
-class TensorToSVGHybrid:
-    def __init__(self, svg_tensor_converter_instance):
-        self.converter = svg_tensor_converter_instance # Instance of SVGToTensor_Normalized
-
-        # Reverse mappings for convenience
-        self.element_map_rev = {v: k for k, v in self.converter.ELEMENT_TYPES.items()}
-        self.command_map_rev = {v: k for k, v in self.converter.PATH_COMMAND_TYPES.items()}
-        
-        # Command IDs from the converter for easier reference
-        self.CMD_M = self.converter.PATH_COMMAND_TYPES.get('m', -1) # Use .get for safety
-        self.CMD_L = self.converter.PATH_COMMAND_TYPES.get('l', -1)
-        self.CMD_H = self.converter.PATH_COMMAND_TYPES.get('h', -1)
-        self.CMD_V = self.converter.PATH_COMMAND_TYPES.get('v', -1)
-        self.CMD_C = self.converter.PATH_COMMAND_TYPES.get('c', -1)
-        self.CMD_S = self.converter.PATH_COMMAND_TYPES.get('s', -1) # Not explicitly handled below, add if needed
-        self.CMD_Q = self.converter.PATH_COMMAND_TYPES.get('q', -1)
-        self.CMD_T = self.converter.PATH_COMMAND_TYPES.get('t', -1) # Not explicitly handled below, add if needed
-        self.CMD_A = self.converter.PATH_COMMAND_TYPES.get('a', -1)
-        self.CMD_Z = self.converter.PATH_COMMAND_TYPES.get('z', -1)
-        self.CMD_DEF = self.converter.PATH_COMMAND_TYPES.get('DEF', -1) # For shape definitions
-        # Assuming SOS/EOS/PAD are handled by their element types, not command types here for path data
-
-    def _denormalize(self, norm_value, val_min, val_max):
-        """De-normalizes value from [target_norm_min, target_norm_max] to [val_min, val_max]."""
-        target_min = self.converter.target_norm_min
-        target_max = self.converter.target_norm_max
-
-        if target_max == target_min: return target_min # Avoid division by zero
-        if val_max == val_min: return val_min # If original range was a point
-
-        # De-normalize from [target_min, target_max] to [0, 1]
-        norm_0_1 = (norm_value - target_min) / (target_max - target_min)
-        # Scale from [0, 1] to [val_min, val_max]
-        value = norm_0_1 * (val_max - val_min) + val_min
-        return value
-
-    def _format_geo_params(self, cmd_id, geo_params_norm):
-        # geo_params_norm is a tensor/list of 8 normalized values (µ0 to ν3)
-        # Returns a list of de-normalized, formatted strings for the SVG path 'd' attribute
-        params_str = []
-        cmd_char = self.command_map_rev.get(cmd_id, '?').lower() # Get char like 'm', 'l'
-
-        # Dequantize based on known parameter meanings for each command
-        # µ0,ν0 (params 0,1), µ1,ν1 (2,3), µ2,ν2 (4,5), µ3,ν3 (6,7)
-        if cmd_char in ['m', 'l', 't']: # End point (x,y)
-            params_str.append(f"{self._denormalize(geo_params_norm[6], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
-            params_str.append(f"{self._denormalize(geo_params_norm[7], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
-        elif cmd_char in ['h']: # End x
-            params_str.append(f"{self._denormalize(geo_params_norm[6], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
-        elif cmd_char in ['v']: # End y
-            params_str.append(f"{self._denormalize(geo_params_norm[7], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
-        elif cmd_char in ['c']: # cx1,cy1, cx2,cy2, ex,ey
-            for i in range(2, 8): # indices 2 through 7 of geo_params_norm
-                params_str.append(f"{self._denormalize(geo_params_norm[i], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
-        elif cmd_char in ['q', 's']: # cx,cy, ex,ey (S might need different handling if it implies prev control point)
-            # For Q: µ1,ν1 (c1x,c1y), µ3,ν3 (ex,ey) -> params 2,3,6,7
-            params_str.append(f"{self._denormalize(geo_params_norm[2], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
-            params_str.append(f"{self._denormalize(geo_params_norm[3], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
-            params_str.append(f"{self._denormalize(geo_params_norm[6], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
-            params_str.append(f"{self._denormalize(geo_params_norm[7], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
-        elif cmd_char == 'a': # rx,ry, x-axis-rot, large-arc, sweep, ex,ey
-            # Mapping from paper/SVG spec to 8 slots:
-            # µ1(rx), ν1(ry), µ2(xrot), ν2(large-arc), µ0(sweep-flag - not used in 8 params?), ν0(?), µ3(ex), ν3(ey)
-            # This needs careful mapping based on how SVGToTensor_Normalized packs Arc params into 8 slots.
-            # Assuming: geo_params_norm[2]=rx, [3]=ry, [4]=xrot, [5]=large-arc, [0]=sweep (example)
-            params_str.append(f"{self._denormalize(geo_params_norm[2], self.converter.RADIUS_MIN, self.converter.RADIUS_MAX):.1f}") # rx
-            params_str.append(f"{self._denormalize(geo_params_norm[3], self.converter.RADIUS_MIN, self.converter.RADIUS_MAX):.1f}") # ry
-            params_str.append(f"{self._denormalize(geo_params_norm[4], self.converter.ROT_MIN, self.converter.ROT_MAX):.1f}")      # x-axis-rotation
-            params_str.append(f"{int(round(self._denormalize(geo_params_norm[5], self.converter.FLAG_MIN, self.converter.FLAG_MAX)))}") # large-arc-flag
-            params_str.append(f"{int(round(self._denormalize(geo_params_norm[0], self.converter.FLAG_MIN, self.converter.FLAG_MAX)))}") # sweep-flag (example slot)
-            params_str.append(f"{self._denormalize(geo_params_norm[6], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}") # ex
-            params_str.append(f"{self._denormalize(geo_params_norm[7], self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}") # ey
-        elif cmd_char == 'z':
-            pass # No params
-        return params_str
-
-    def _format_style_attributes(self, style_params_norm):
-        # style_params_norm: [R, G, B, Alpha] (normalized)
-        attrs = []
-        try:
-            r = int(round(self._denormalize(style_params_norm[0], self.converter.COLOR_MIN, self.converter.COLOR_MAX)))
-            g = int(round(self._denormalize(style_params_norm[1], self.converter.COLOR_MIN, self.converter.COLOR_MAX)))
-            b = int(round(self._denormalize(style_params_norm[2], self.converter.COLOR_MIN, self.converter.COLOR_MAX)))
-            alpha = self._denormalize(style_params_norm[3], self.converter.OPACITY_MIN, self.converter.OPACITY_MAX)
-
-            r = max(0, min(255, r)); g = max(0, min(255, g)); b = max(0, min(255, b))
-            alpha = max(0.0, min(1.0, alpha))
-
-            attrs.append(f'fill="#{r:02x}{g:02x}{b:02x}"')
-            if alpha < 0.995: # Only add opacity if not fully opaque
-                attrs.append(f'fill-opacity="{alpha:.2f}"')
-            # Assuming no stroke for simplicity here, add if your model predicts stroke
-            attrs.append('stroke="none"')
-        except IndexError:
-            print("WARN: Index error processing style params.")
-            attrs.append('fill="black" stroke="none"') # Fallback
-        return " ".join(attrs)
-
-    def reconstruct_svg_elements(self, tensor_data_hybrid, actual_len=None):
-        # tensor_data_hybrid: [L, 2 (IDs) + N_other_cont_params]
-        # Example: L, 2 + 8 geo + 4 style = L, 14
-        if actual_len is not None:
-            tensor_to_process = tensor_data_hybrid[:actual_len]
-        else:
-            tensor_to_process = tensor_data_hybrid
-        
-        svg_elements_strings = []
-        current_path_segments = []
-        last_element_type_id = -1
-
-        for i in range(tensor_to_process.shape[0]):
-            row = tensor_to_process[i]
-            elem_id = int(row[0].item())
-            cmd_id = int(row[1].item())
-            # Continuous params start from index 2
-            # First 8 are geo, next 4 are style (R,G,B,A)
-            geo_params_norm = row[2 : 2+8] 
-            style_params_norm = row[2+8 : 2+8+4]
-
-            elem_tag_str = self.element_map_rev.get(elem_id, None)
-            cmd_char_from_id = self.command_map_rev.get(cmd_id, '').lower() # m, l, def, etc.
-
-            if elem_tag_str is None or elem_tag_str in ['<BOS>', '<PAD>']:
-                continue
-            if elem_tag_str == '<EOS>':
-                break # Stop processing at EOS
-
-            # Finalize previous path if current element is not a path continuation
-            if elem_tag_str != "<path>" and current_path_segments:
-                style_attrs_str = self._format_style_attributes(last_path_style_params) # Use style of last path segment
-                svg_elements_strings.append(f'  <path d="{" ".join(current_path_segments)}" {style_attrs_str}/>')
-                current_path_segments = []
-
-            if elem_tag_str == "<path>":
-                if not current_path_segments: # Start of a new path element
-                    # We need to decide when a path element "ends". 
-                    # The original paper implies paths can have multiple commands then a style.
-                    # For simplicity, let's assume each path command row might start a new path
-                    # if the previous wasn't also a path, or continues it.
-                    # This part of the logic is tricky without knowing how SVGToTensor groups path commands
-                    # into a single <path> element with one style.
-                    # Let's assume for now that a sequence of path commands belong to one path until a non-path element.
-                    pass # Handled by appending to current_path_segments
-
-                formatted_geo_params = self._format_geo_params(cmd_id, geo_params_norm)
-                current_path_segments.append(f"{cmd_char_from_id.upper()} {' '.join(formatted_geo_params)}")
-                last_path_style_params = style_params_norm # Store style for when path ends
-            
-            elif elem_tag_str == "<rect>" and cmd_char_from_id == "def":
-                # Assuming geo_params_norm for rect: x,y,rx,ry,w,h (in the first 6 slots of 8)
-                x = self._denormalize(geo_params_norm[0], self.converter.COORD_MIN, self.converter.COORD_MAX)
-                y = self._denormalize(geo_params_norm[1], self.converter.COORD_MIN, self.converter.COORD_MAX)
-                rx = self._denormalize(geo_params_norm[2], self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
-                ry = self._denormalize(geo_params_norm[3], self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
-                w = self._denormalize(geo_params_norm[4], self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
-                h = self._denormalize(geo_params_norm[5], self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
-                style_attrs_str = self._format_style_attributes(style_params_norm)
-                svg_elements_strings.append(f'  <rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="{rx:.1f}" ry="{ry:.1f}" {style_attrs_str}/>')
-
-            elif elem_tag_str == "<circle>" and cmd_char_from_id == "def":
-                # Assuming geo_params_norm for circle: cx,cy,r (in first 3 slots)
-                cx = self._denormalize(geo_params_norm[0], self.converter.COORD_MIN, self.converter.COORD_MAX)
-                cy = self._denormalize(geo_params_norm[1], self.converter.COORD_MIN, self.converter.COORD_MAX)
-                r  = self._denormalize(geo_params_norm[2], self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
-                style_attrs_str = self._format_style_attributes(style_params_norm)
-                svg_elements_strings.append(f'  <circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" {style_attrs_str}/>')
-            
-            elif elem_tag_str == "<ellipse>" and cmd_char_from_id == "def":
-                # Assuming geo_params_norm for ellipse: cx,cy,rx,ry (in first 4 slots)
-                cx = self._denormalize(geo_params_norm[0], self.converter.COORD_MIN, self.converter.COORD_MAX)
-                cy = self._denormalize(geo_params_norm[1], self.converter.COORD_MIN, self.converter.COORD_MAX)
-                rx = self._denormalize(geo_params_norm[2], self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
-                ry = self._denormalize(geo_params_norm[3], self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
-                style_attrs_str = self._format_style_attributes(style_params_norm)
-                svg_elements_strings.append(f'  <ellipse cx="{cx:.1f}" cy="{cy:.1f}" rx="{rx:.1f}" ry="{ry:.1f}" {style_attrs_str}/>')
-
-            last_element_type_id = elem_id
-
-        # Finalize any pending path after loop
-        if current_path_segments:
-            style_attrs_str = self._format_style_attributes(last_path_style_params)
-            svg_elements_strings.append(f'  <path d="{" ".join(current_path_segments)}" {style_attrs_str}/>')
-
-        return svg_elements_strings
-
-    def create_svg_document(self, svg_element_strings_list, viewbox_dims=(128,128)):
-        width, height = viewbox_dims
-        viewBox_str = f"0 0 {width} {height}"
-        svg_header = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg" viewBox="{viewBox_str}">'
-        svg_footer = '</svg>'
-        return f"{svg_header}\n" + "\n".join(svg_element_strings_list) + f"\n{svg_footer}"
-
-# --- Wrapper Function ---
-def tensor_to_svg_file_hybrid_wrapper(
-    predicted_hybrid_tensor_cpu, # Tensor from model output, moved to CPU
-    output_filename,
-    svg_tensor_converter_instance, # Passed for de-norm data
-    actual_len=None # Optional: number of valid rows before padding/EOS
-):
-    reconstructor = TensorToSVGHybrid(svg_tensor_converter_instance)
-    svg_element_strings = reconstructor.reconstruct_svg_elements(predicted_hybrid_tensor_cpu, actual_len)
-    # Assuming viewbox from training config or a default for reconstruction
-    # You might need to pass viewbox info if it varies and is important
-    viewbox_w = getattr(svg_tensor_converter_instance, 'viewBox_width_norm', 128) # Example default
-    viewbox_h = getattr(svg_tensor_converter_instance, 'viewBox_height_norm', 128)
-    
-    final_svg_content = reconstructor.create_svg_document(svg_element_strings, viewbox_dims=(viewbox_w, viewbox_h))
-    
-    try:
-        with open(output_filename, 'w') as f:
-            f.write(final_svg_content)
-        print(f"INFO: Reconstructed SVG saved to: {output_filename}")
-    except Exception as e_write:
-        print(f"ERROR: Failed to write SVG file {output_filename}: {e_write}")
-    return final_svg_content
-
 # --- Paths and Config ---
 # Path to the precomputed data list (output of dataset_preparation_dynamic.py using HYBRID format)
-PRECOMPUTED_DATA_PATH = '/home/dataset/optimized_progressive_dataset_precomputed_v2.pt' # ADJUST IF NEEDED
+PRECOMPUTED_DATA_PATH = './datasets/optimized_progressive_dataset_precomputed_v2.pt' # ADJUST IF NEEDED
 MODEL_PATH = 'vp_vae_accel_hybrid_ancient-dust-2_s5000_best.pt' # !!! REPLACE WITH YOUR ACTUAL HYBRID MODEL PATH !!!
 OUTPUT_DIR = 'vae_reconstructions_hybrid_eval_final' # New output dir name
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -372,7 +157,7 @@ if __name__ == "__main__":
     ## if umbrella in precomputed_data_list_for_eval[0]['file_name_stem']:
 
     # Filter for items with 'umbrella' in the filename stem
-    umbrella_items = [item for item in precomputed_data_list_for_eval if 'email-icon' in item['file_name_stem']]
+    umbrella_items = [item for item in precomputed_data_list_for_eval if 'crab' in item['file_name_stem']]
     if umbrella_items:
         eval_items_list = umbrella_items
         print(f"Found {len(eval_items_list)} SVGs with 'umbrella' in filename.")
@@ -452,10 +237,11 @@ if __name__ == "__main__":
                         break
                 
                 output_svg_filename = os.path.join(OUTPUT_DIR, f"reconstructed_hybrid_{filename_stem}.svg")
+                print(actual_recon_len)
                 print(reconstructed_tensor_hybrid.shape)
-                print(reconstructed_tensor_hybrid[:actual_recon_len])
+                print(reconstructed_tensor_hybrid[:7])
 
-                #print(actual_recon_len)
+                print(actual_recon_len)
                 
                 
                 tensor_to_svg_file_hybrid_wrapper(
