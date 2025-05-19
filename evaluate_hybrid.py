@@ -8,12 +8,13 @@ import numpy as np # For t-SNE if used
 from sklearn.manifold import TSNE # For t-SNE if used
 import matplotlib.pyplot as plt # For t-SNE if used
 import traceback # For detailed errors
+import torch.nn.functional as F # For loss functions
 
 
 # Ensure sys.path is set if svgutils is not in standard locations
 import sys
 import random
-sys.path.append(".")
+sys.path.append("/home/")
 
 try:
     from models import VPVAE # Your trained model class
@@ -26,8 +27,8 @@ except ImportError as e:
 
 # --- Paths and Config ---
 # Path to the precomputed data list (output of dataset_preparation_dynamic.py using HYBRID format)
-PRECOMPUTED_DATA_PATH = './datasets/optimized_progressive_dataset_precomputed_v2.pt' # ADJUST IF NEEDED
-MODEL_PATH = 'vp_vae_accel_hybrid_ancient-dust-2_s5000_best.pt' # !!! REPLACE WITH YOUR ACTUAL HYBRID MODEL PATH !!!
+PRECOMPUTED_DATA_PATH = '/home/dataset/optimized_progressive_dataset_precomputed_v2.pt' # ADJUST IF NEEDED
+MODEL_PATH = '/home/best_models/vp_vae_accel_hybrid_leafy-serenity-16_s14300_best.pt' # !!! REPLACE WITH YOUR ACTUAL HYBRID MODEL PATH !!!
 OUTPUT_DIR = 'vae_reconstructions_hybrid_eval_final' # New output dir name
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -38,7 +39,8 @@ def set_seed_eval(seed): # Renamed to avoid conflict if imported elsewhere
 
 if __name__ == "__main__":
     set_seed_eval(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = "cpu"
     print(f"Using device: {device}")
 
     # --- 1. Define Config Manually (MUST MATCH THE TRAINED HYBRID MODEL'S CONFIG) ---
@@ -157,7 +159,7 @@ if __name__ == "__main__":
     ## if umbrella in precomputed_data_list_for_eval[0]['file_name_stem']:
 
     # Filter for items with 'umbrella' in the filename stem
-    umbrella_items = [item for item in precomputed_data_list_for_eval if 'crab' in item['file_name_stem']]
+    umbrella_items = [item for item in precomputed_data_list_for_eval if 'banana' in item['file_name_stem']]
     if umbrella_items:
         eval_items_list = umbrella_items
         print(f"Found {len(eval_items_list)} SVGs with 'umbrella' in filename.")
@@ -174,7 +176,8 @@ if __name__ == "__main__":
             try:
                 filename_stem = item_data['file_name_stem']
                 
-                full_svg_content_unpadded = item_data['full_svg_matrix_content'].to(device) 
+                full_svg_content_unpadded = item_data['full_svg_matrix_content'].to(device)
+                #print(full_svg_content_unpadded) 
                 final_pixel_cls_token = item_data['cumulative_pixel_CLS_tokens_aligned'][-1, :].to(device)
 
                 # Prepare ENCODER input
@@ -239,9 +242,20 @@ if __name__ == "__main__":
                 output_svg_filename = os.path.join(OUTPUT_DIR, f"reconstructed_hybrid_{filename_stem}.svg")
                 print(actual_recon_len)
                 print(reconstructed_tensor_hybrid.shape)
-                print(reconstructed_tensor_hybrid[:7])
+                
 
                 print(actual_recon_len)
+                print("printing reconstructed tensor")
+                
+                #print(reconstructed_tensor_hybrid[:actual_recon_len])
+
+                gt_cont = full_svg_content_unpadded[:actual_recon_len, 2:]
+                pred_cont = reconstructed_tensor_hybrid[:actual_recon_len-1, 2:]
+
+                print(pred_cont.shape, gt_cont.shape)
+
+                mse_loss = F.mse_loss(pred_cont, gt_cont)
+                print("MSE loss (continuous params):", mse_loss.item())
                 
                 
                 tensor_to_svg_file_hybrid_wrapper(
