@@ -109,7 +109,8 @@ class TensorToSVGHybrid:
             style_params_norm = row[2+self.converter.num_geom_params : 2+self.converter.num_geom_params+self.converter.num_fill_style_params]
 
             elem_tag_str = self.element_map_rev.get(elem_id, None)
-            #print(elem_tag_str)
+            print(elem_tag_str)
+            #print(geo_params_norm)
 
             if elem_tag_str is None or elem_tag_str in ['<BOS>', '<PAD>']:
                 continue
@@ -160,7 +161,8 @@ class TensorToSVGHybrid:
                     current_path_d_segments = []
                     current_path_style_params = None
             
-            elif elem_tag_str == "rect" and cmd_id == self.CMD_DEF_ID:
+            elif elem_tag_str == "rect":
+                print("Rect")
                 x = self._denormalize(geo_params_norm[0].item(), self.converter.COORD_MIN, self.converter.COORD_MAX)
                 y = self._denormalize(geo_params_norm[1].item(), self.converter.COORD_MIN, self.converter.COORD_MAX)
                 rx = self._denormalize(geo_params_norm[2].item(), self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
@@ -170,14 +172,15 @@ class TensorToSVGHybrid:
                 style_attrs_str = self._format_style_attributes(style_params_norm)
                 svg_elements_strings.append(f'  <rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="{rx:.1f}" ry="{ry:.1f}" {style_attrs_str}/>')
 
-            elif elem_tag_str == "circle" and cmd_id == self.CMD_DEF_ID:
+            elif elem_tag_str == "circle":
+                print("Circle")
                 cx = self._denormalize(geo_params_norm[0].item(), self.converter.COORD_MIN, self.converter.COORD_MAX)
                 cy = self._denormalize(geo_params_norm[1].item(), self.converter.COORD_MIN, self.converter.COORD_MAX)
                 r  = self._denormalize(geo_params_norm[2].item(), self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
                 style_attrs_str = self._format_style_attributes(style_params_norm)
                 svg_elements_strings.append(f'  <circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" {style_attrs_str}/>')
             
-            elif elem_tag_str == "ellipse" and cmd_id == self.CMD_DEF_ID:
+            elif elem_tag_str == "ellipse" :
                 cx = self._denormalize(geo_params_norm[0].item(), self.converter.COORD_MIN, self.converter.COORD_MAX)
                 cy = self._denormalize(geo_params_norm[1].item(), self.converter.COORD_MIN, self.converter.COORD_MAX)
                 rx = self._denormalize(geo_params_norm[2].item(), self.converter.RADIUS_MIN, self.converter.RADIUS_MAX)
