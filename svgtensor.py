@@ -42,6 +42,8 @@ class SVGToTensor_Normalized_v0:
         }
         self.NO_CMD_IDX = self.PATH_COMMAND_TYPES['NO_CMD']
         self.DEFAULT_PARAM_VAL = 0.0 # Default for unused normalized parameter slots
+        self.DEFAULT_PARAM_VAL_NORM = 0.001956947162426559
+        self.DEFAULT_RGB_OPX_NORM = -1.0
 
 
     def _normalize(self, value, val_min, val_max):
