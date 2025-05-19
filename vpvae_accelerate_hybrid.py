@@ -318,7 +318,7 @@ def main():
         print(f"Data: Num Element Types: {num_element_types}, Num Command Types: {num_command_types}, Num Other Cont. Feats: {num_other_continuous_features}, DINO Dim: {dino_embed_dim_from_data}")
 
     config_dict = {
-        "learning_rate": 3e-4, "total_steps": 15000, "batch_size_per_device": 32,
+        "learning_rate": 3e-4, "total_steps": 15000, "batch_size_per_device": 64,
         "warmup_steps": 300, "lr_decay_min": 1.5e-5, "weight_decay": 0.1,
         "log_interval": 10, "eval_interval": 100,
         "latent_dim": 128, "encoder_layers": 4, "decoder_layers": 4,
@@ -461,15 +461,39 @@ def main():
 
             current_lr = optimizer.param_groups[0]['lr'] 
             # ... (LR schedule update logic as before) ...
+            # if global_step < config_dict["warmup_steps"]:
+            #     lr_scale = float(global_step + 1) / float(config_dict["warmup_steps"])
+            #     scaled_lr = config_dict["learning_rate"] * lr_scale
+            #     for param_group in optimizer.param_groups: param_group['lr'] = scaled_lr
+            #     current_lr = scaled_lr
+            # elif global_step == config_dict["warmup_steps"] and accelerator.is_main_process: 
+            #     print(f"Warmup done. LR: {optimizer.param_groups[0]['lr']:.2e}")
+            # elif global_step > config_dict["warmup_steps"]: 
+            #      scheduler.step(); current_lr = scheduler.get_last_lr()[0]
             if global_step < config_dict["warmup_steps"]:
-                lr_scale = float(global_step + 1) / float(config_dict["warmup_steps"])
-                scaled_lr = config_dict["learning_rate"] * lr_scale
-                for param_group in optimizer.param_groups: param_group['lr'] = scaled_lr
-                current_lr = scaled_lr
-            elif global_step == config_dict["warmup_steps"] and accelerator.is_main_process: 
-                print(f"Warmup done. LR: {optimizer.param_groups[0]['lr']:.2e}")
-            elif global_step > config_dict["warmup_steps"]: 
-                 scheduler.step(); current_lr = scheduler.get_last_lr()[0]
+                # Manual linear warmup
+                lr_scale = float(global_step + 1) / float(max(1, config_dict["warmup_steps"]))
+                scaled_lr = config_dict["learning_rate"] * lr_scale 
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = scaled_lr
+                current_lr = scaled_lr # LR used for this step
+            
+            else: # global_step >= warmup_steps (Scheduler takes over)
+                # This 'else' block will be entered when global_step == warmup_steps for the first time
+                if global_step == config_dict["warmup_steps"] and accelerator.is_main_process:
+                    # Optimizer LR is at its peak from the last warmup step (global_step = warmup_steps - 1).
+                    # Now, scheduler.step() will be called for global_step = warmup_steps.
+                    print(f"Warmup phase complete at END of GS={global_step-1}. Optimizer LR is {optimizer.param_groups[0]['lr']:.2e}. Scheduler now active for GS={global_step}.")
+                
+                # Important: Ensure optimizer has the correct starting LR for the scheduler 
+                # *before* the first scheduler.step() if it wasn't set by the last warmup iteration.
+                # In our case, at global_step == warmup_steps, the LR in optimizer *should* be config_dict["learning_rate"]
+                # because the last warmup scaling happened at global_step = warmup_steps - 1.
+                
+                if accelerator.is_main_process:
+                    scheduler.step()
+                accelerator.wait_for_everyone() 
+                current_lr = optimizer.param_groups[0]['lr']
             
             # Update running losses with new components
             running_losses['total']+=loss.item(); running_losses['ce_elem']+=ce_e.item(); 
@@ -478,7 +502,7 @@ def main():
             global_step += 1
             
             if accelerator.is_main_process:
-                desc = f"E{epoch+1} GS{global_step} L:{loss.item():.3f}(E:{ce_e.item():.3f},C:{ce_c.item():.3f},P:{mse_p.item():.3f},KL:{kl.item():.3f}) LR:{current_lr:.1e}"
+                desc = f"E{epoch+1} GS{global_step} L:{loss.item():.3f}(E:{ce_e.item():.3f},C:{ce_c.item():.3f},P:{mse_p.item():.3f},KL:{kl.item():.3f}) LR:{current_lr:.5f}"
                 epoch_pbar.set_description(desc)
                 if global_step % config_dict["log_interval"] == 0:
                     avg_losses = {k: v / config_dict["log_interval"] for k, v in running_losses.items()}
