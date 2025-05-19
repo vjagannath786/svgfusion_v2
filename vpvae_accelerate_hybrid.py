@@ -1,6 +1,6 @@
 # --- START OF FILE vpvae_accelerate_hybrid_no_tau.py ---
 import sys
-sys.path.append('.') # Or your project root
+sys.path.append('/home/') # Or your project root
 
 import torch
 import torch.nn as nn
@@ -90,8 +90,8 @@ class VPVAEEncoder(nn.Module):
 
         self.svg_projection = nn.Linear(self.svg_input_feature_dim, d_model)
         self.pixel_projection = nn.Linear(pixel_feature_dim, d_model)
-        self.svg_norm_pre_proj = nn.LayerNorm(self.svg_input_feature_dim)
-        self.pixel_norm_pre_proj = nn.LayerNorm(pixel_feature_dim)
+        #self.svg_norm_pre_proj = nn.LayerNorm(self.svg_input_feature_dim)
+        #self.pixel_norm_pre_proj = nn.LayerNorm(pixel_feature_dim)
 
         self.cross_attention = MultiHeadAttention(d_model=d_model, num_heads=num_heads, kdim=d_model, vdim=d_model, batch_first=True)
         self.cross_attn_norm = nn.LayerNorm(d_model)
@@ -114,11 +114,11 @@ class VPVAEEncoder(nn.Module):
         svg_features_concatenated = torch.cat([elem_embeds, cmd_embeds, other_continuous_params], dim=-1)
         
         svg_features_rope = apply_rope(svg_features_concatenated)
-        svg_features_normed = self.svg_norm_pre_proj(svg_features_rope)
-        svg_projected = self.svg_projection(svg_features_normed) 
+        #svg_features_normed = self.svg_norm_pre_proj(svg_features_rope)
+        svg_projected = self.svg_projection(svg_features_rope) 
 
-        pixel_features_normed = self.pixel_norm_pre_proj(pixel_embedding) 
-        pixel_projected = self.pixel_projection(pixel_features_normed)
+        #pixel_features_normed = self.pixel_norm_pre_proj(pixel_embedding) 
+        pixel_projected = self.pixel_projection(pixel_embedding)
 
         cross_attn_output = self.cross_attention(query=svg_projected, key=pixel_projected, value=pixel_projected, key_padding_mask=pixel_padding_mask)
         x = self.cross_attn_norm(svg_projected + cross_attn_output)
@@ -255,11 +255,30 @@ def get_kl_weight(step, total_steps, max_kl_weight=0.1, anneal_portion=0.8, sche
     else: return max_kl_weight
 
 def main():
+    # --- MODIFIED: Add argument for resuming ---
+    # parser = argparse.ArgumentParser(description="VP-VAE Training with Accelerate")
+    # parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+    #                     help="Path to a checkpoint directory to resume training from.")
+    # args = parser.parse_args()
+    
+
+
+    # # Initialize training state variables
+    # # These will be overwritten if resuming from checkpoint
+    # start_epoch = 0
+    # completed_steps = 0 # Renamed from global_step to avoid conflict with loop var
+    # best_eval_loss = float('inf')
+    # # Initialize history lists
+    # logged_steps_hist = []; step_lr_hist = []
+    # step_loss_total_hist = []; step_loss_ce_elem_hist = []; step_loss_ce_cmd_hist = []
+    # step_loss_mse_cont_hist = []; step_loss_kl_hist = []
+    # step_eval_loss_hist = []
+
     accelerator = Accelerator(log_with="wandb")
 
     # IMPORTANT: DATASET_FILE must contain data in the new hybrid format
     # Col 0: Element ID (int), Col 1: Command ID (int), Cols 2-13: Continuous normalized params
-    DATASET_FILE = os.path.join('./',  'optimized_progressive_dataset_precomputed_v2.pt') # EXAMPLE
+    DATASET_FILE = os.path.join('/home/', 'dataset/', 'optimized_progressive_dataset_precomputed_v2.pt') # EXAMPLE
     DATASET_FILE = os.path.abspath(DATASET_FILE)
     
     if accelerator.is_main_process: print(f"Loading HYBRID data from '{DATASET_FILE}'...")
@@ -299,15 +318,15 @@ def main():
         print(f"Data: Num Element Types: {num_element_types}, Num Command Types: {num_command_types}, Num Other Cont. Feats: {num_other_continuous_features}, DINO Dim: {dino_embed_dim_from_data}")
 
     config_dict = {
-        "learning_rate": 3e-4, "total_steps": 20000, "batch_size_per_device": 32,
-        "warmup_steps": 500, "lr_decay_min": 1.5e-5, "weight_decay": 0.1,
-        "log_interval": 20, "eval_interval": 250,
+        "learning_rate": 3e-4, "total_steps": 15000, "batch_size_per_device": 32,
+        "warmup_steps": 300, "lr_decay_min": 1.5e-5, "weight_decay": 0.1,
+        "log_interval": 10, "eval_interval": 100,
         "latent_dim": 128, "encoder_layers": 4, "decoder_layers": 4,
         "encoder_d_model": 512, "decoder_d_model": 512,
         "element_embed_dim": 64, "command_embed_dim": 64,
         "num_other_continuous_svg_features": num_other_continuous_features, # For encoder and decoder
         "pixel_feature_dim": dino_embed_dim_from_data, "num_heads": 8, 
-        "kl_weight_max": 0.0002, "kl_anneal_portion": 0.7,
+        "kl_weight_max": 0.0001, "kl_anneal_portion": 0.8,
         "ce_elem_weight": 1.0, "ce_cmd_weight": 1.5, "mse_cont_weight": 10.0, # Adjusted weights
         "dataset_source": DATASET_FILE, "architecture": "VPVAE_Accel_HybridLoss_NoTau",
         "max_seq_len_train": 1024, 
@@ -366,8 +385,8 @@ def main():
     def collate_fn(batch):
         svg_matrices = torch.stack([item[0] for item in batch]); pixel_embeds = torch.stack([item[1] for item in batch]); attention_masks = torch.stack([item[2] for item in batch])
         return svg_matrices, pixel_embeds, attention_masks
-    train_dataloader = DataLoader(train_dataset, batch_size=config_dict["batch_size_per_device"], shuffle=True, num_workers=0, collate_fn=collate_fn)
-    eval_dataloader = DataLoader(eval_dataset_subset, batch_size=config_dict["batch_size_per_device"], shuffle=False, num_workers=0, collate_fn=collate_fn)
+    train_dataloader = DataLoader(train_dataset, batch_size=config_dict["batch_size_per_device"], shuffle=True, num_workers=4, collate_fn=collate_fn)
+    eval_dataloader = DataLoader(eval_dataset_subset, batch_size=config_dict["batch_size_per_device"], shuffle=False, num_workers=4, collate_fn=collate_fn)
 
     model = VPVAE(
         num_element_types=config_dict["num_element_types"],
@@ -388,7 +407,7 @@ def main():
         command_padding_idx=config_dict["command_padding_idx"]
     )
 
-    optimizer = optim.AdamW(model.parameters(), lr=config_dict["learning_rate"], weight_decay=config_dict["weight_decay"], betas=(0.9, 0.95))
+    optimizer = optim.AdamW(model.parameters(), lr=config_dict["learning_rate"], weight_decay=config_dict["weight_decay"], betas=(0.9, 0.999))
     steps_after_warmup = config_dict["total_steps"] - config_dict["warmup_steps"]
     scheduler = CosineAnnealingLR(optimizer, T_max=max(1, steps_after_warmup), eta_min=config_dict["lr_decay_min"])
     
@@ -449,7 +468,7 @@ def main():
                 current_lr = scaled_lr
             elif global_step == config_dict["warmup_steps"] and accelerator.is_main_process: 
                 print(f"Warmup done. LR: {optimizer.param_groups[0]['lr']:.2e}")
-            if global_step >= config_dict["warmup_steps"]: 
+            elif global_step > config_dict["warmup_steps"]: 
                  scheduler.step(); current_lr = scheduler.get_last_lr()[0]
             
             # Update running losses with new components
