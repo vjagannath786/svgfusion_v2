@@ -42,8 +42,6 @@ class SVGToTensor_Normalized_v0:
         }
         self.NO_CMD_IDX = self.PATH_COMMAND_TYPES['NO_CMD']
         self.DEFAULT_PARAM_VAL = 0.0 # Default for unused normalized parameter slots
-        self.DEFAULT_PARAM_VAL_NORM = 0.001956947162426559
-        self.DEFAULT_RGB_OPX_NORM = -1.0
 
 
     def _normalize(self, value, val_min, val_max):
@@ -219,10 +217,10 @@ class SVGToTensor_Normalized:
         self.output_matrix_cols = 3 + self.num_geom_params + self.num_fill_style_params # 3 + 8 + 4 = 15
 
         # Parameter ranges
-        self.COORD_MIN, self.COORD_MAX = -256.0, 255.0 # Expanded slightly based on typical SVG canvas sizes
-        self.RADIUS_MIN, self.RADIUS_MAX = 0.0, 256.0 # For r, rx, ry, width, height
+        self.COORD_MIN, self.COORD_MAX = -128.0, 127.0 # Expanded slightly based on typical SVG canvas sizes
+        self.RADIUS_MIN, self.RADIUS_MAX = 0.0, 128.0 # For r, rx, ry, width, height
         self.FLAG_MIN, self.FLAG_MAX = 0.0, 1.0       # Arc flags
-        self.ROT_MIN, self.ROT_MAX = -360.0, 360.0    # Arc x-axis-rotation (SVG allows any real, often clamped)
+        self.ROT_MIN, self.ROT_MAX = -180.0, 180.0    # Arc x-axis-rotation (SVG allows any real, often clamped)
         self.OPACITY_MIN, self.OPACITY_MAX = 0.0, 1.0
         self.COLOR_MIN, self.COLOR_MAX = 0.0, 255.0
         # STROKEW_MIN, STROKEW_MAX are not used as we only encode fill style here
@@ -248,6 +246,8 @@ class SVGToTensor_Normalized:
         #self.DEF_CMD_IDX = self.PATH_COMMAND_TYPES['DEF']
         
         self.DEFAULT_PARAM_VAL = 0.0 # Default for unused normalized parameter slots
+        self.DEFAULT_PARAM_VAL_NORM = 0.001956947162426559
+        self.DEFAULT_RGB_OPX_NORM = -1.0
 
     def _normalize(self, value, val_min, val_max):
         value = float(value)
@@ -343,8 +343,8 @@ class SVGToTensor_Normalized:
                 if cmd_char.lower() == 'm':
                     if len(raw_values) >= 2:
                         dx, dy = raw_values[0], raw_values[1]
-                        next_x = dx if cmd_char.isupper() else temp_current_x + dx
-                        next_y = dy if cmd_char.isupper() else temp_current_y + dy
+                        next_x = dx
+                        next_y = dy
                         # For M, µ₀,ν₀ and µ₃,ν₃ are the new point.
                         geom_params_norm[0] = self._normalize(next_x, self.COORD_MIN, self.COORD_MAX) 
                         geom_params_norm[1] = self._normalize(next_y, self.COORD_MIN, self.COORD_MAX) 
@@ -358,29 +358,29 @@ class SVGToTensor_Normalized:
                     if cmd_char.lower() == 'l':
                         if len(raw_values) >= 2:
                             dx, dy = raw_values[0], raw_values[1]
-                            next_x = dx if cmd_char.isupper() else temp_current_x + dx
-                            next_y = dy if cmd_char.isupper() else temp_current_y + dy
+                            next_x = dx
+                            next_y = dy
                             geom_params_norm[6] = self._normalize(next_x, self.COORD_MIN, self.COORD_MAX)
                             geom_params_norm[7] = self._normalize(next_y, self.COORD_MIN, self.COORD_MAX)
                     elif cmd_char.lower() == 'h':
                         if len(raw_values) >= 1:
                             dx = raw_values[0]
-                            next_x = dx if cmd_char.isupper() else temp_current_x + dx
+                            next_x = dx
                             # next_y remains temp_current_y
                             geom_params_norm[6] = self._normalize(next_x, self.COORD_MIN, self.COORD_MAX)
                             geom_params_norm[7] = self._normalize(temp_current_y, self.COORD_MIN, self.COORD_MAX)
                     elif cmd_char.lower() == 'v':
                         if len(raw_values) >= 1:
                             dy = raw_values[0]
-                            next_y = dy if cmd_char.isupper() else temp_current_y + dy
+                            next_y = dy
                             # next_x remains temp_current_x
                             geom_params_norm[6] = self._normalize(temp_current_x, self.COORD_MIN, self.COORD_MAX)
                             geom_params_norm[7] = self._normalize(next_y, self.COORD_MIN, self.COORD_MAX)
                     elif cmd_char.lower() == 'c':
                         if len(raw_values) >= 6:
                             c1x, c1y, c2x, c2y, ex, ey = raw_values
-                            if cmd_char.islower(): 
-                                c1x+=temp_current_x; c1y+=temp_current_y; c2x+=temp_current_x; c2y+=temp_current_y; ex+=temp_current_x; ey+=temp_current_y
+                            # if cmd_char.islower(): 
+                            #     c1x+=temp_current_x; c1y+=temp_current_y; c2x+=temp_current_x; c2y+=temp_current_y; ex+=temp_current_x; ey+=temp_current_y
                             geom_params_norm[2] = self._normalize(c1x, self.COORD_MIN, self.COORD_MAX)
                             geom_params_norm[3] = self._normalize(c1y, self.COORD_MIN, self.COORD_MAX)
                             geom_params_norm[4] = self._normalize(c2x, self.COORD_MIN, self.COORD_MAX)
@@ -391,8 +391,8 @@ class SVGToTensor_Normalized:
                     elif cmd_char.lower() in ['q', 's']: # Assuming S gets simplified to Q-like params by parser or here
                         if len(raw_values) >= 4: # (c1x, c1y, ex, ey)
                             c1x, c1y, ex, ey = raw_values
-                            if cmd_char.islower():
-                                c1x+=temp_current_x; c1y+=temp_current_y; ex+=temp_current_x; ey+=temp_current_y
+                            # if cmd_char.islower():
+                            #     c1x+=temp_current_x; c1y+=temp_current_y; ex+=temp_current_x; ey+=temp_current_y
                             geom_params_norm[2] = self._normalize(c1x, self.COORD_MIN, self.COORD_MAX) 
                             geom_params_norm[3] = self._normalize(c1y, self.COORD_MIN, self.COORD_MAX) 
                             # µ₂, ν₂ (geom_params_norm[4,5]) remain default for Q
@@ -402,8 +402,8 @@ class SVGToTensor_Normalized:
                     elif cmd_char.lower() in ['t']: # Assuming T gets simplified to Q-like params by parser or here
                          if len(raw_values) >= 2: # (ex, ey) - control point is implicit
                             ex, ey = raw_values
-                            if cmd_char.islower():
-                                ex+=temp_current_x; ey+=temp_current_y
+                            # if cmd_char.islower():
+                            #     ex+=temp_current_x; ey+=temp_current_y
                             # For T, control point is reflection of previous Q's control point.
                             # This simplified version doesn't calculate it, sets cp1 to current point.
                             geom_params_norm[2] = self._normalize(temp_current_x, self.COORD_MIN, self.COORD_MAX) 
@@ -415,13 +415,14 @@ class SVGToTensor_Normalized:
                         if len(raw_values) >= 7:
                             svg_rx, svg_ry, svg_x_axis_rot, svg_large_arc_flag, svg_sweep_flag, svg_ex, svg_ey = raw_values
                             next_x, next_y = svg_ex, svg_ey
-                            if cmd_char.islower(): next_x += temp_current_x; next_y += temp_current_y
-                            
-                            geom_params_norm[2] = self._normalize(svg_rx, self.RADIUS_MIN, self.RADIUS_MAX)           # µ₁ = rx
-                            geom_params_norm[3] = self._normalize(svg_ry, self.RADIUS_MIN, self.RADIUS_MAX)           # ν₁ = ry
-                            geom_params_norm[4] = self._normalize(svg_x_axis_rot, self.ROT_MIN, self.ROT_MAX)         # µ₂ = x-axis-rotation
-                            geom_params_norm[5] = self._normalize(svg_large_arc_flag, self.FLAG_MIN, self.FLAG_MAX)  # ν₂ = large-arc-flag
-                            # sweep-flag is omitted.
+                            # if cmd_char.islower(): 
+                            #     next_x += temp_current_x; next_y += temp_current_y
+                            geom_params_norm[0] = temp_current_y
+                            geom_params_norm[1] = self._normalize(svg_rx, self.RADIUS_MIN, self.RADIUS_MAX)           # µ₁ = rx
+                            geom_params_norm[2] = self._normalize(svg_ry, self.RADIUS_MIN, self.RADIUS_MAX)           # ν₁ = ry
+                            geom_params_norm[3] = self._normalize(svg_x_axis_rot, self.ROT_MIN, self.ROT_MAX)         # µ₂ = x-axis-rotation
+                            geom_params_norm[4] = self._normalize(svg_large_arc_flag, self.FLAG_MIN, self.FLAG_MAX)  # ν₂ = large-arc-flag
+                            geom_params_norm[5] = self._normalize(svg_sweep_flag, self.FLAG_MIN, self.FLAG_MAX)  # ν₂ = sweep-flag
                             geom_params_norm[6] = self._normalize(next_x, self.COORD_MIN, self.COORD_MAX)           # µ₃ = end_x
                             geom_params_norm[7] = self._normalize(next_y, self.COORD_MIN, self.COORD_MAX)           # ν₃ = end_y
                     elif cmd_char.lower() == 'z':
