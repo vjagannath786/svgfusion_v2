@@ -431,7 +431,7 @@ def main():
     #scheduler = CosineAnnealingLR(optimizer, T_max=max(1, steps_after_warmup), eta_min=config_dict["lr_decay_min"])
     scheduler = cosine_warmup_scheduler(
                     optimizer,
-                    warmup_steps=config_dict["warmup_steps"],
+                    warmup_steps=config_dict["warmup_steps"] * 2,
                     total_steps=config_dict["total_steps"] * 2,
                     initial_lr=config_dict["learning_rate"],
                     min_lr=config_dict["lr_decay_min"]
