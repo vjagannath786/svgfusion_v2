@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import LambdaLR
 import wandb
 import math
 import random
@@ -254,6 +255,20 @@ def get_kl_weight(step, total_steps, max_kl_weight=0.1, anneal_portion=0.8, sche
     if step < anneal_steps: return max_kl_weight * (step / max(1, anneal_steps))
     else: return max_kl_weight
 
+def cosine_warmup_scheduler(optimizer, warmup_steps, total_steps, initial_lr, min_lr):
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))  # Warmup
+        # Ensure progress never exceeds 1.0 and spans full decay phase
+        progress = min(
+            float(step - warmup_steps) / float(max(1, total_steps - warmup_steps)),
+            1.0  # Hard clamp to prevent overshooting
+        )
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))  # Cosine decay
+        decayed_lr = min_lr + (initial_lr - min_lr) * cosine_decay  # No division by initial_lr
+        return decayed_lr / initial_lr  # Normalize to [0, 1] for LambdaLR
+    return LambdaLR(optimizer, lr_lambda)
+
 def main():
     # --- MODIFIED: Add argument for resuming ---
     # parser = argparse.ArgumentParser(description="VP-VAE Training with Accelerate")
@@ -316,9 +331,10 @@ def main():
 
     if accelerator.is_main_process: 
         print(f"Data: Num Element Types: {num_element_types}, Num Command Types: {num_command_types}, Num Other Cont. Feats: {num_other_continuous_features}, DINO Dim: {dino_embed_dim_from_data}")
+        print(f"Accelerate: Number of processes: {accelerator.num_processes}")
 
     config_dict = {
-        "learning_rate": 3e-4, "total_steps": 15000, "batch_size_per_device": 64,
+        "learning_rate": 3e-4, "total_steps": 20000, "batch_size_per_device": 32,
         "warmup_steps": 300, "lr_decay_min": 1.5e-5, "weight_decay": 0.1,
         "log_interval": 10, "eval_interval": 100,
         "latent_dim": 128, "encoder_layers": 4, "decoder_layers": 4,
@@ -347,7 +363,10 @@ def main():
     # SOS/EOS/PAD Token Rows for HYBRID data (elem_id, cmd_id, then continuous normalized)
     # IDs should be floats for tensor cat, but will be cast to long before embedding lookup
     # Continuous parts should be normalized defaults.
-    default_cont_param_values = torch.full((num_other_continuous_features,), temp_converter.DEFAULT_PARAM_VAL, dtype=torch.float32)
+    defult_geo_values = torch.full((num_other_continuous_features-4,), temp_converter.DEFAULT_PARAM_VAL, dtype=torch.float32)
+    default_style_values = torch.full((4,), temp_converter.DEFAULT_PARAM_VAL, dtype=torch.float32)
+    #default_cont_param_values = torch.full((num_other_continuous_features,), temp_converter.DEFAULT_PARAM_VAL, dtype=torch.float32)
+    default_cont_param_values = torch.cat([defult_geo_values, default_style_values], dim=0)
 
     sos_elem_id_val = float(temp_converter.ELEMENT_TYPES['<BOS>'])
     eos_elem_id_val = float(temp_converter.ELEMENT_TYPES['<EOS>'])
@@ -409,7 +428,14 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=config_dict["learning_rate"], weight_decay=config_dict["weight_decay"], betas=(0.9, 0.999))
     steps_after_warmup = config_dict["total_steps"] - config_dict["warmup_steps"]
-    scheduler = CosineAnnealingLR(optimizer, T_max=max(1, steps_after_warmup), eta_min=config_dict["lr_decay_min"])
+    #scheduler = CosineAnnealingLR(optimizer, T_max=max(1, steps_after_warmup), eta_min=config_dict["lr_decay_min"])
+    scheduler = cosine_warmup_scheduler(
+                    optimizer,
+                    warmup_steps=config_dict["warmup_steps"],
+                    total_steps=config_dict["total_steps"] * 2,
+                    initial_lr=config_dict["learning_rate"],
+                    min_lr=config_dict["lr_decay_min"]
+                )
     
     model, optimizer, train_dataloader, eval_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, eval_dataloader, scheduler)
@@ -456,44 +482,47 @@ def main():
                     if accelerator.is_main_process: print(f"NaN/Inf (GS{global_step}). Skip.");
                     optimizer.zero_grad(); continue
                 accelerator.backward(loss)
-                if accelerator.sync_gradients: accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                if accelerator.sync_gradients: accelerator.clip_grad_norm_(model.parameters(), 2.0)
                 optimizer.step()
 
-            current_lr = optimizer.param_groups[0]['lr'] 
-            # ... (LR schedule update logic as before) ...
-            # if global_step < config_dict["warmup_steps"]:
-            #     lr_scale = float(global_step + 1) / float(config_dict["warmup_steps"])
-            #     scaled_lr = config_dict["learning_rate"] * lr_scale
-            #     for param_group in optimizer.param_groups: param_group['lr'] = scaled_lr
-            #     current_lr = scaled_lr
-            # elif global_step == config_dict["warmup_steps"] and accelerator.is_main_process: 
-            #     print(f"Warmup done. LR: {optimizer.param_groups[0]['lr']:.2e}")
-            # elif global_step > config_dict["warmup_steps"]: 
-            #      scheduler.step(); current_lr = scheduler.get_last_lr()[0]
-            if global_step < config_dict["warmup_steps"]:
-                # Manual linear warmup
-                lr_scale = float(global_step + 1) / float(max(1, config_dict["warmup_steps"]))
-                scaled_lr = config_dict["learning_rate"] * lr_scale 
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = scaled_lr
-                current_lr = scaled_lr # LR used for this step
             
-            else: # global_step >= warmup_steps (Scheduler takes over)
-                # This 'else' block will be entered when global_step == warmup_steps for the first time
-                if global_step == config_dict["warmup_steps"] and accelerator.is_main_process:
-                    # Optimizer LR is at its peak from the last warmup step (global_step = warmup_steps - 1).
-                    # Now, scheduler.step() will be called for global_step = warmup_steps.
-                    print(f"Warmup phase complete at END of GS={global_step-1}. Optimizer LR is {optimizer.param_groups[0]['lr']:.2e}. Scheduler now active for GS={global_step}.")
+            scheduler.step() # Update scheduler after optimizer step
+            current_lr = scheduler.get_last_lr()[0] # Get current learning rate
+            # current_lr = optimizer.param_groups[0]['lr'] 
+            # # ... (LR schedule update logic as before) ...
+            # # if global_step < config_dict["warmup_steps"]:
+            # #     lr_scale = float(global_step + 1) / float(config_dict["warmup_steps"])
+            # #     scaled_lr = config_dict["learning_rate"] * lr_scale
+            # #     for param_group in optimizer.param_groups: param_group['lr'] = scaled_lr
+            # #     current_lr = scaled_lr
+            # # elif global_step == config_dict["warmup_steps"] and accelerator.is_main_process: 
+            # #     print(f"Warmup done. LR: {optimizer.param_groups[0]['lr']:.2e}")
+            # # elif global_step > config_dict["warmup_steps"]: 
+            # #      scheduler.step(); current_lr = scheduler.get_last_lr()[0]
+            # if global_step < config_dict["warmup_steps"]:
+            #     # Manual linear warmup
+            #     lr_scale = float(global_step + 1) / float(max(1, config_dict["warmup_steps"]))
+            #     scaled_lr = config_dict["learning_rate"] * lr_scale 
+            #     for param_group in optimizer.param_groups:
+            #         param_group['lr'] = scaled_lr
+            #     current_lr = scaled_lr # LR used for this step
+            
+            # else: # global_step >= warmup_steps (Scheduler takes over)
+            #     # This 'else' block will be entered when global_step == warmup_steps for the first time
+            #     if global_step == config_dict["warmup_steps"] and accelerator.is_main_process:
+            #         # Optimizer LR is at its peak from the last warmup step (global_step = warmup_steps - 1).
+            #         # Now, scheduler.step() will be called for global_step = warmup_steps.
+            #         print(f"Warmup phase complete at END of GS={global_step-1}. Optimizer LR is {optimizer.param_groups[0]['lr']:.2e}. Scheduler now active for GS={global_step}.")
                 
-                # Important: Ensure optimizer has the correct starting LR for the scheduler 
-                # *before* the first scheduler.step() if it wasn't set by the last warmup iteration.
-                # In our case, at global_step == warmup_steps, the LR in optimizer *should* be config_dict["learning_rate"]
-                # because the last warmup scaling happened at global_step = warmup_steps - 1.
+            #     # Important: Ensure optimizer has the correct starting LR for the scheduler 
+            #     # *before* the first scheduler.step() if it wasn't set by the last warmup iteration.
+            #     # In our case, at global_step == warmup_steps, the LR in optimizer *should* be config_dict["learning_rate"]
+            #     # because the last warmup scaling happened at global_step = warmup_steps - 1.
                 
-                if accelerator.is_main_process:
-                    scheduler.step()
-                accelerator.wait_for_everyone() 
-                current_lr = optimizer.param_groups[0]['lr']
+            #     if accelerator.is_main_process:
+            #         scheduler.step()
+            #     accelerator.wait_for_everyone() 
+            #     current_lr = optimizer.param_groups[0]['lr']
             
             # Update running losses with new components
             running_losses['total']+=loss.item(); running_losses['ce_elem']+=ce_e.item(); 
