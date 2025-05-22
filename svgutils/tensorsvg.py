@@ -64,7 +64,7 @@ class TensorToSVGHybrid:
 
     def _format_style_attributes(self, style_params_norm):
         # ... (style formatting as before) ...
-        print(style_params_norm)
+        #print(style_params_norm)
         attrs = []
         try:
             r_norm = style_params_norm[0].item() if torch.is_tensor(style_params_norm[0]) else style_params_norm[0]
@@ -79,7 +79,7 @@ class TensorToSVGHybrid:
 
             r = max(0, min(255, r)); g = max(0, min(255, g)); b = max(0, min(255, b))
             alpha = 1.0
-            print(r, g,b)
+            #print(r, g,b)
 
             attrs.append(f'fill="#{r:02x}{g:02x}{b:02x}"')
             if alpha < 0.995: attrs.append(f'fill-opacity="{alpha:.2f}"')
@@ -109,7 +109,7 @@ class TensorToSVGHybrid:
             style_params_norm = row[2+self.converter.num_geom_params : 2+self.converter.num_geom_params+self.converter.num_fill_style_params]
 
             elem_tag_str = self.element_map_rev.get(elem_id, None)
-            print(elem_tag_str)
+            #print(elem_tag_str)
             #print(geo_params_norm)
 
             if elem_tag_str is None or elem_tag_str in ['<BOS>', '<PAD>']:
@@ -216,7 +216,7 @@ def tensor_to_svg_file_hybrid_wrapper(
     reconstructor = TensorToSVGHybrid(svg_tensor_converter_instance)
     svg_element_strings = reconstructor.reconstruct_svg_elements(predicted_hybrid_tensor_cpu, actual_len)
     viewbox_w = getattr(svg_tensor_converter_instance, 'viewBox_width_unnormalized', 128) 
-    viewbox_h = getattr(svg_tensor_converter_instance, 'viewBox_height_unnormalized', 150) # Match test
+    viewbox_h = getattr(svg_tensor_converter_instance, 'viewBox_height_unnormalized', 128) # Match test
     final_svg_content = reconstructor.create_svg_document(svg_element_strings, viewbox_dims=(int(viewbox_w), int(viewbox_h)))
     try:
         with open(output_filename, 'w') as f: f.write(final_svg_content)
