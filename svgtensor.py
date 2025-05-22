@@ -417,12 +417,12 @@ class SVGToTensor_Normalized:
                             next_x, next_y = svg_ex, svg_ey
                             # if cmd_char.islower(): 
                             #     next_x += temp_current_x; next_y += temp_current_y
-                            geom_params_norm[0] = temp_current_y
-                            geom_params_norm[1] = self._normalize(svg_rx, self.RADIUS_MIN, self.RADIUS_MAX)           # µ₁ = rx
-                            geom_params_norm[2] = self._normalize(svg_ry, self.RADIUS_MIN, self.RADIUS_MAX)           # ν₁ = ry
-                            geom_params_norm[3] = self._normalize(svg_x_axis_rot, self.ROT_MIN, self.ROT_MAX)         # µ₂ = x-axis-rotation
-                            geom_params_norm[4] = self._normalize(svg_large_arc_flag, self.FLAG_MIN, self.FLAG_MAX)  # ν₂ = large-arc-flag
-                            geom_params_norm[5] = self._normalize(svg_sweep_flag, self.FLAG_MIN, self.FLAG_MAX)  # ν₂ = sweep-flag
+                            #geom_params_norm[0] = temp_current_y
+                            geom_params_norm[0] = self._normalize(svg_rx, self.RADIUS_MIN, self.RADIUS_MAX)           # µ₁ = rx
+                            geom_params_norm[1] = self._normalize(svg_ry, self.RADIUS_MIN, self.RADIUS_MAX)           # ν₁ = ry
+                            geom_params_norm[2] = self._normalize(svg_x_axis_rot, self.ROT_MIN, self.ROT_MAX)         # µ₂ = x-axis-rotation
+                            geom_params_norm[3] = self._normalize(svg_large_arc_flag, self.FLAG_MIN, self.FLAG_MAX)  # ν₂ = large-arc-flag
+                            geom_params_norm[4] = self._normalize(svg_sweep_flag, self.FLAG_MIN, self.FLAG_MAX)  # ν₂ = sweep-flag
                             geom_params_norm[6] = self._normalize(next_x, self.COORD_MIN, self.COORD_MAX)           # µ₃ = end_x
                             geom_params_norm[7] = self._normalize(next_y, self.COORD_MIN, self.COORD_MAX)           # ν₃ = end_y
                     elif cmd_char.lower() == 'z':
