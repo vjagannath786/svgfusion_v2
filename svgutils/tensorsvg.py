@@ -55,8 +55,8 @@ class TensorToSVGHybrid:
                 params_str_list.append(f"{self._denormalize(geo_params_norm[2].item(), self.converter.ROT_MIN, self.converter.ROT_MAX):.1f}")    
                 params_str_list.append(f"{int(round(self._denormalize(geo_params_norm[3].item(), self.converter.FLAG_MIN, self.converter.FLAG_MAX)))}")
                 params_str_list.append(f"{int(round(self._denormalize(geo_params_norm[4].item(), self.converter.FLAG_MIN, self.converter.FLAG_MAX)))}")
-                params_str_list.append(f"{self._denormalize(geo_params_norm[5].item(), self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
                 params_str_list.append(f"{self._denormalize(geo_params_norm[6].item(), self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
+                params_str_list.append(f"{self._denormalize(geo_params_norm[7].item(), self.converter.COORD_MIN, self.converter.COORD_MAX):.1f}")
             elif cmd_char == 'z': pass 
         except IndexError: print(f"WARN: IndexError formatting geo params for cmd '{cmd_char}'. Geo params: {geo_params_norm}")
         return " ".join(params_str_list)
