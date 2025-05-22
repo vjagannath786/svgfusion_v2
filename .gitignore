@@ -172,3 +172,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+#dataset
+./dataset/*.pt
+./dataset/*.pth
+
+##best_models
+./best_models/*.pth
+./best_models/*.pt

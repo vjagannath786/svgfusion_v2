@@ -293,7 +293,7 @@ def main():
 
     # IMPORTANT: DATASET_FILE must contain data in the new hybrid format
     # Col 0: Element ID (int), Col 1: Command ID (int), Cols 2-13: Continuous normalized params
-    DATASET_FILE = os.path.join('/home/', 'dataset/', 'optimized_progressive_dataset_precomputed_v2.pt') # EXAMPLE
+    DATASET_FILE = os.path.join('/home/', 'dataset/', 'optimized_progressive_dataset_precomputed_v5.pt') # EXAMPLE
     DATASET_FILE = os.path.abspath(DATASET_FILE)
     
     if accelerator.is_main_process: print(f"Loading HYBRID data from '{DATASET_FILE}'...")
