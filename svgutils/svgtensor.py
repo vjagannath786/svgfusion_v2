@@ -231,6 +231,10 @@ class SVGToTensor_Normalized:
         self.target_norm_min = target_norm_min
         self.target_norm_max = target_norm_max
 
+        num_bins = 256 # Number of bins for quantization
+        self.num_bins = num_bins
+        self.bin_max_idx = num_bins - 1
+
         # Element type indices (ρ in the new scheme)
         # Using 0-indexed values. The image's example values (1,6,4,7,2) might be from a different mapping.
         self.ELEMENT_TYPES = {'<BOS>':0, 'rect': 1, 'circle': 2, 'ellipse': 3, 'path': 4, '<EOS>':5, '<PAD>':6 }
@@ -249,7 +253,7 @@ class SVGToTensor_Normalized:
         self.DEFAULT_PARAM_VAL_NORM = 0.001956947162426559
         self.DEFAULT_RGB_OPX_NORM = -1.0
 
-    def _normalize(self, value, val_min, val_max):
+    def _normalize_v1(self, value, val_min, val_max):
         value = float(value)
         val_min, val_max = float(val_min), float(val_max)
         if val_max == val_min: # Avoid division by zero
@@ -263,9 +267,31 @@ class SVGToTensor_Normalized:
 
 
         value_clamped = max(val_min, min(value, val_max)) # Clamp to original range
-        norm_0_1 = (value_clamped - val_min) / (val_max - val_min)
-        return norm_0_1 * (self.target_norm_max - self.target_norm_min) + self.target_norm_min
+        if val_min == -128.0:
+            return value_clamped + abs(val_min) # Adjust for negative min
+        else:
+            return value_clamped
+        #norm_0_1 = (value_clamped - val_min) / (val_max - val_min)
+        #return norm_0_1 * (self.target_norm_max - self.target_norm_min) + self.target_norm_min
         #return value
+
+    def _normalize(self, value, min_val, max_val):
+        ### actually quanitizing
+        
+        """Quantizes value to [0, num_bins-1]"""
+        #print(value, min_val, max_val)
+        if max_val == min_val: return 1
+        # Ensure value is tensor for clamp
+        value_tensor = torch.tensor(value, dtype=torch.float32)
+        value_clamped = torch.clamp(value_tensor, min_val, max_val)
+        # Prevent division by zero or negative range
+        range_val = max(max_val - min_val, 1e-9)
+        value_shifted = value_clamped - min_val
+        # Calculate bin index carefully
+        bin_index = torch.floor(value_shifted / range_val * self.num_bins)
+        # Final clamp to ensure index is within bounds
+        bin_index = torch.clamp(bin_index, 0, self.bin_max_idx)
+        return bin_index.long().item()
 
     def _get_fill_style_params_normalized(self, style_data):
         """Normalizes fill color (RGB) and fill opacity (A) parameters."""
