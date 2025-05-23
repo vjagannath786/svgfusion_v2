@@ -12,5 +12,7 @@ pip install matplotlib
 pip install accelerate
 pip install wandb
 pip install scikit-learn
+pip install kaggle
+pip install transformers
 
 echo "Installation complete."
