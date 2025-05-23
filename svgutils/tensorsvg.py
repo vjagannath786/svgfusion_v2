@@ -16,9 +16,10 @@ class TensorToSVGHybrid:
         }
         self.CMD_M_ID = self.converter.PATH_COMMAND_TYPES.get('m', -1)
         self.CMD_Z_ID = self.converter.PATH_COMMAND_TYPES.get('z', -1)
+        self.num_bins = 256
 
 
-    def _denormalize(self, norm_value, val_min, val_max):
+    def _denormalize_v1(self, norm_value, val_min, val_max):
         # ... (denormalization logic as before) ...
         target_min = self.converter.target_norm_min
         target_max = self.converter.target_norm_max
@@ -27,6 +28,17 @@ class TensorToSVGHybrid:
         norm_0_1 = (norm_value - target_min) / (target_max - target_min)
         value = norm_0_1 * (val_max - val_min) + val_min
         return value
+    
+    def _denormalize(self, bin_index, min_val, max_val):
+        """Converts bin index back to approximate continuous value."""
+        bin_index = float(bin_index) # Ensure float
+        if max_val == min_val: return min_val
+        range_val = max_val - min_val
+        # Use midpoint of the bin for better approximation
+        value_shifted_approx = (bin_index + 0.5) * (range_val / self.num_bins)
+        value_approx = value_shifted_approx + min_val
+
+        return value_approx
 
     def _format_geo_params_for_path_d(self, cmd_id, geo_params_norm):
         # ... (geo param formatting as before) ...
