@@ -1,8 +1,6 @@
-%%writefile models/vpvae_accelerate_ce.py
-
 # --- START OF FILE vpvae_accelerate_ce.py ---
 import sys
-sys.path.append('/kaggle/working/') # Or your project root
+sys.path.append('/home/svgfusion_v2/') # Or your project root
 
 import torch
 import torch.nn as nn
@@ -348,7 +346,7 @@ def main():
 
     # IMPORTANT: DATASET_FILE must contain data in the new hybrid format
     # Col 0: Element ID (int), Col 1: Command ID (int), Cols 2-13: Continuous normalized params
-    DATASET_FILE = os.path.join('/kaggle/input/', 'progressive-v2/', 'optimized_progressive_dataset_precomputed_v8.pt') # EXAMPLE
+    DATASET_FILE = os.path.join('/home/svgfusion_v2/', 'dataset/', 'optimized_progressive_dataset_precomputed_v8.pt') # EXAMPLE
     DATASET_FILE = os.path.abspath(DATASET_FILE)
     
     if accelerator.is_main_process: print(f"Loading HYBRID data from '{DATASET_FILE}'...")
