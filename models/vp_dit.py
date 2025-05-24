@@ -251,8 +251,10 @@ class VS_DiT(nn.Module):
             #    This is CRITICAL for starting with context "off"
             if hasattr(self, 'context_proj'): # If it exists (it does in the seqcond version)
                 nn.init.xavier_uniform_(self.context_proj.weight)
+                #nn.init.constant_(self.context_proj.weight, 0) # Zero initialization
                 if self.context_proj.bias is not None:
                     nn.init.constant_(self.context_proj.bias, 0)
+                    #nn.init.xavier_uniform_(self.context_proj.bias)
 
             # 4. Initialize timestep embedding MLP (OVERRIDE _basic_init)
             if hasattr(self.t_embedder, 'mlp'):
@@ -589,7 +591,7 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
         pred_x0 = (z_t - sqrt_one_minus_alpha_bar_t * eps_pred) / sqrt_alpha_bar_t
         #print("before clamping")
         #print(pred_x0.min(), pred_x0.max())
-        pred_x0 = torch.clamp(pred_x0, -5, 5)
+        pred_x0 = torch.clamp(pred_x0, -8, 8)
 
         # Deterministic part
         dir_xt = torch.sqrt(alpha_bar_t_prev) * pred_x0
@@ -616,6 +618,305 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
     print(f"z_t mean: {z_t.mean():.4f}, std: {z_t.std():.4f}")
     
     return z_t
+
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
+from tqdm import tqdm
+
+@torch.no_grad()
+def ddim_sample_v3(model, shape, context_seq, context_padding_mask,
+                diff_params, num_timesteps, target_device, cfg_scale=3.0, eta=0.0, 
+                clip_model=None, clip_tokenizer=None, return_visuals=True):
+
+    model.eval()
+    batch_size = shape[0]
+    z_t = torch.randn(shape, device=target_device)
+
+    # Move context to device
+    context_seq = context_seq.to(target_device)
+    if context_padding_mask is not None:
+        context_padding_mask = context_padding_mask.to(target_device)
+
+    # Empty text for unconditional context
+    max_length = context_seq.size(1)
+    empty_text = clip_tokenizer(
+        "" * batch_size,
+        padding='max_length',
+        max_length=max_length,
+        truncation=True,
+        return_tensors="pt"
+    ).to(target_device)
+
+    empty_outputs = clip_model(**empty_text)
+    uncond_context_seq = empty_outputs.last_hidden_state
+    uncond_context_seq = uncond_context_seq.repeat(batch_size, 1, 1)
+    uncond_padding_mask = ~(empty_text.attention_mask.bool()).repeat(batch_size, 1)
+
+    # Track values for plotting
+    cosine_sims = []
+    cfg_scales = []
+    eps_stats = []
+
+    for i in tqdm(reversed(range(num_timesteps)), desc="DDIM Sampling"):
+        t = torch.full((batch_size,), i, dtype=torch.long, device=target_device)
+        alpha_bar_t = diff_params["alphas_cumprod"][t].view(-1, 1)
+        alpha_bar_t_prev = diff_params["alphas_cumprod_prev"][t].view(-1, 1)
+        sqrt_one_minus_alpha_bar_t = diff_params["sqrt_one_minus_alphas_cumprod"][t].view(-1, 1)
+        sqrt_alpha_bar_t = diff_params["sqrt_alphas_cumprod"][t].view(-1, 1)
+
+        eps_cond = model(z_t, t, context_seq, context_padding_mask)
+        eps_uncond = model(z_t, t, uncond_context_seq, uncond_padding_mask)
+
+        cosine_sim = F.cosine_similarity(eps_cond.flatten(1), eps_uncond.flatten(1), dim=1).mean().item()
+        cosine_sims.append(cosine_sim)
+
+        # Dynamic CFG scale
+        min_sim = 0.90
+        max_sim = 0.99
+        cosine_sim_clamped = max(min(cosine_sim, max_sim), min_sim)
+        scale_factor = 1 + ((cosine_sim_clamped - min_sim) / (max_sim - min_sim))
+        current_cfg = cfg_scale * scale_factor
+        current_cfg = min(current_cfg, cfg_scale * 2.0)
+        cfg_scales.append(current_cfg)
+
+        eps_pred = eps_uncond + current_cfg * (eps_cond - eps_uncond)
+
+        # Save statistics for visualization
+        eps_stats.append({
+            'eps_cond_mean': eps_cond.mean().item(),
+            'eps_uncond_mean': eps_uncond.mean().item(),
+            'eps_pred_mean': eps_pred.mean().item()
+        })
+
+        sigma_t = eta * torch.sqrt(
+            (1 - alpha_bar_t_prev) / (1 - alpha_bar_t) *
+            (1 - alpha_bar_t / alpha_bar_t_prev)
+        )
+
+        pred_x0 = (z_t - sqrt_one_minus_alpha_bar_t * eps_pred) / sqrt_alpha_bar_t
+        pred_x0 = torch.clamp(pred_x0, -8, 8)
+
+        dir_xt = torch.sqrt(alpha_bar_t_prev) * pred_x0
+        noise_xt = torch.sqrt(1 - alpha_bar_t_prev - sigma_t ** 2) * eps_pred
+
+        if eta > 0:
+            z_t_prev = dir_xt + noise_xt + sigma_t * torch.randn_like(z_t)
+        else:
+            z_t_prev = dir_xt + noise_xt
+
+        z_t = z_t_prev
+
+    # Plotting
+    if return_visuals:
+        steps = list(range(num_timesteps))[::-1]
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+        
+        # Cosine similarity plot
+        ax1.plot(steps, cosine_sims, label='Cosine Similarity', color='blue')
+        ax1.set_ylabel('Cosine Similarity')
+        ax1.set_xlabel('Timestep')
+        ax1.set_title('Cosine Similarity Over Time')
+        ax1.grid(True)
+        ax1.invert_xaxis()
+        
+        # CFG scale plot
+        ax2.plot(steps, cfg_scales, label='CFG Scale', color='green')
+        ax2.set_ylabel('CFG Scale')
+        ax2.set_xlabel('Timestep')
+        ax2.set_title('CFG Scale Over Time')
+        ax2.grid(True)
+        ax2.invert_xaxis()
+        
+        plt.tight_layout()
+        #plt.gca().invert_xaxis()
+        plt.show()
+
+    return z_t, {
+        "cosine_sims": cosine_sims,
+        "cfg_scales": cfg_scales,
+        "eps_stats": eps_stats
+    }
+
+
+@torch.no_grad()
+def get_clip_embeddings_seqcond_dpm(prompt, uncond_prompt, clip_model, clip_tokenizer, device, batch_size=1):
+    """
+    Gets conditional and unconditional CLIP last_hidden_state embeddings for DPM solver.
+    """
+    clip_model.eval()
+
+    # Conditional
+    cond_inputs = clip_tokenizer(
+        [prompt] * batch_size, padding="max_length", truncation=True, return_tensors="pt" # Ensure max_length is sensible or from tokenizer
+    ).to(device)
+    cond_outputs = clip_model(**cond_inputs)
+    cond_emb = cond_outputs.last_hidden_state
+    cond_mask = ~(cond_inputs.attention_mask.bool())
+
+    # Unconditional
+    uncond_inputs = clip_tokenizer(
+        [uncond_prompt] * batch_size, padding="max_length", max_length=cond_inputs.input_ids.shape[1], truncation=True, return_tensors="pt"
+    ).to(device)
+    uncond_outputs = clip_model(**uncond_inputs)
+    uncond_emb = uncond_outputs.last_hidden_state
+    uncond_mask = ~(uncond_inputs.attention_mask.bool())
+
+    return cond_emb, cond_mask, uncond_emb, uncond_mask
+
+@torch.no_grad()
+def dpm_solver_2m_20_steps(
+    model,
+    shape, 
+    prompt: str,
+    uncond_prompt: str = "", 
+    clip_model=None,
+    clip_tokenizer=None,
+    total_train_timesteps: int = 1000,
+    betas=None, 
+    cfg_scale: float = 3.0,
+    device: torch.device = torch.device("cpu"),
+    seed: int = 42,
+    latent_min_max=(-8,8) 
+):
+    """
+    DPM-Solver (2nd order, multistep-like) for exactly 20 inference steps.
+    Assumes model predicts epsilon (noise).
+    """
+    if seed is not None:
+        if device.type == 'mps': # MPS specific seeding if needed
+            try: torch.mps.manual_seed(seed)
+            except AttributeError: torch.manual_seed(seed) # Fallback
+        else:
+            torch.manual_seed(seed)
+        if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
+
+
+    num_inference_steps = 20
+    batch_size = shape[0]
+
+    step_ratio = total_train_timesteps / num_inference_steps # Use float division
+    # Timesteps: T, T-step_ratio, ..., step_ratio, (approx 0)
+    # We need indices from T-1 down to 0 for alpha_bar access
+    timesteps_idx_float = torch.arange(num_inference_steps, 0, -1).float() * step_ratio - (step_ratio / 2) # Center points of intervals
+    timesteps_idx = torch.clamp(torch.round(timesteps_idx_float - 0.5 + 1e-8), 0, total_train_timesteps -1).long().to(device) # Map to valid indices
+    
+    # More robust way to define inference timesteps for DPM-Solver (from high noise to low)
+    # Equivalent to np.linspace(total_train_timesteps -1, 0, num_inference_steps +1) then taking first num_inference_steps
+    # This creates num_inference_steps intervals, and we take the start of each.
+    solver_timesteps = torch.linspace(total_train_timesteps -1 , 0, num_inference_steps + 1, device=device).long()
+
+
+    if betas is None:
+        betas = get_linear_noise_schedule(total_train_timesteps).to(device)
+    else:
+        betas = betas.to(device)
+
+
+    alphas = 1.0 - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0) # Already on device if betas is
+    
+    alpha_bar = alphas_cumprod
+    sigma_bar = torch.sqrt(1.0 - alpha_bar) 
+    
+    # Lambda for DPM-Solver (epsilon prediction model)
+    # lambda_t = log(alpha_bar_t) - log(sigma_bar_t)  where sigma_bar_t = sqrt(1-alpha_bar_t)
+    # Ensure no log(0) by clamping sigma_bar slightly away from 0 if alpha_bar is 1.0
+    # alpha_bar[total_train_timesteps-1] is alpha_bar_0 which is close to 1.0
+    # alpha_bar[0] is alpha_bar_T which is small.
+    # sigma_bar for t=0 (alpha_bar=1) is 0. Handle log(0).
+    # Let's use a small epsilon for log_sigma_bar.
+    # For the last step where sigma_bar_prev might be 0 (t_idx_prev = 0 if model trained up to T-1)
+    # A common practice is to ensure sigma_bar_t is never exactly zero for log.
+    # However, alpha_bar[0] (for t=0 from solver_timesteps) is 1.0, so sigma_bar[0] is 0.0.
+    # We usually sample from T down to a step > 0.
+    # The `solver_timesteps` are [T-1, ..., t_final_step > 0, 0]
+    # The loop will go from T-1 down to t_final_step. The last x_t will be at t_final_step.
+    # Then one final step from t_final_step to 0.
+
+    model.eval()
+
+    cond_emb, cond_mask, uncond_emb, uncond_mask = get_clip_embeddings_seqcond_dpm(
+        prompt, uncond_prompt, clip_model, clip_tokenizer, device, batch_size=batch_size
+    )
+
+    x_t = torch.randn(shape, device=device) # Initial noise x_T
+    
+    prev_model_output = None
+
+    for i in tqdm(range(num_inference_steps), desc="DPM-Solver-2M (20 steps)"):
+        t_idx_curr = solver_timesteps[i]
+        t_idx_prev = solver_timesteps[i+1] # This will be 0 for the last iteration
+
+        t_curr_tensor = torch.full((batch_size,), t_idx_curr, dtype=torch.long, device=device)
+
+        pred_noise_cond = model(x_t, t_curr_tensor, cond_emb, cond_mask)
+        pred_noise_uncond = model(x_t, t_curr_tensor, uncond_emb, uncond_mask)
+        model_output_curr = pred_noise_uncond + cfg_scale * (pred_noise_cond - pred_noise_uncond)
+
+        # Current state values
+        alpha_bar_curr_val = alpha_bar[t_idx_curr]
+        sigma_bar_curr_val = sigma_bar[t_idx_curr]
+        
+        # Next state values (target state)
+        alpha_bar_prev_val = alpha_bar[t_idx_prev] # "prev" in sampling, so lower t
+        sigma_bar_prev_val = sigma_bar[t_idx_prev]
+
+        # DPM-Solver lambda formulation for epsilon prediction model:
+        # lambda_t = log(alpha_bar_t) - log(sigma_bar_t)
+        # Need to handle sigma_bar_t = 0 (when alpha_bar_t = 1, i.e., t=0) for log
+        eps_tiny = 1e-12 # To prevent log(0)
+        lambda_curr = torch.log(alpha_bar_curr_val) - torch.log(sigma_bar_curr_val + eps_tiny)
+        lambda_prev = torch.log(alpha_bar_prev_val) - torch.log(sigma_bar_prev_val + eps_tiny)
+        
+        h = lambda_prev - lambda_curr # h should be positive
+
+        # Reshape for broadcasting (if shape has more than 2 dims, e.g. for images)
+        # For latents [B, D], this might not be strictly needed if ops broadcast correctly.
+        # alpha_bar_curr_val_r = alpha_bar_curr_val.view(-1, *([1]*(x_t.ndim-1))) # More general
+        # sigma_bar_curr_val_r = sigma_bar_curr_val.view(-1, *([1]*(x_t.ndim-1)))
+        # alpha_bar_prev_val_r = alpha_bar_prev_val.view(-1, *([1]*(x_t.ndim-1)))
+        # sigma_bar_prev_val_r = sigma_bar_prev_val.view(-1, *([1]*(x_t.ndim-1)))
+
+        # Use sqrt of alpha_bar for x_t updates when model predicts epsilon
+        sqrt_alpha_bar_curr = torch.sqrt(alpha_bar_curr_val)
+        sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev_val)
+
+        if prev_model_output is None or t_idx_curr == solver_timesteps[0]: # First step always 1st order
+            # DPM-Solver (1st order for epsilon prediction model)
+            # x_s = (sqrt(alpha_bar_s) / sqrt(alpha_bar_t)) * x_t - sigma_bar_s * (exp(h) - 1) * eps_theta(x_t, t)
+            # Here, s is t_idx_prev, t is t_idx_curr
+            x_t = (sqrt_alpha_bar_prev / sqrt_alpha_bar_curr) * x_t - \
+                  (sigma_bar_prev_val * (torch.expm1(h))) * model_output_curr # expm1(h) = exp(h) - 1
+        else:
+            # DPM-Solver (2nd order for epsilon prediction model)
+            # x_s = 1st_order_term - C_2 * (eps_curr - eps_prev)
+            # C_2 = sigma_bar_s * ( (exp(h) - 1) / h - 1 ) * 0.5
+            # (for DPM-Solver-2, not DPM-Solver++(2M) which uses r1, r2)
+
+            first_order_term_val = (sqrt_alpha_bar_prev / sqrt_alpha_bar_curr) * x_t - \
+                                   (sigma_bar_prev_val * torch.expm1(h)) * model_output_curr
+            
+            # If h is very small, (expm1(h)/h - 1) can be unstable. Approx: h/2 for small h.
+            # (expm1(h)/h - 1) is equivalent to (e^h - 1 - h) / h
+            if torch.abs(h) < 1e-8: # Heuristic for small h
+                second_order_coeff_val = h / 2.0 # (h/2 + h^2/6 + ...)
+            else:
+                second_order_coeff_val = (torch.expm1(h) / h) - 1.0
+            
+            second_order_correction = 0.5 * sigma_bar_prev_val * \
+                                      second_order_coeff_val * \
+                                      (model_output_curr - prev_model_output) # Use (D_i - D_{i-1})/h_i if using DPM paper notation more directly for higher orders
+                                                                            # Here, (model_output_curr - prev_model_output) is simpler for order 2.
+            x_t = first_order_term_val - second_order_correction
+            
+        prev_model_output = model_output_curr
+
+    # x_t is now the sample at t=0 (denoised)
+    if latent_min_max is not None:
+        x_t = torch.clamp(x_t, latent_min_max[0], latent_min_max[1])
+        
+    return x_t
 
 
 
