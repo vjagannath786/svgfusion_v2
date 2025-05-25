@@ -86,15 +86,15 @@ class MLP(nn.Module):
         hidden_features = hidden_features or in_features
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.act1 = act_layer()
-        self.fc2 = nn.Linear(hidden_features, hidden_features)
-        self.act2 = act_layer()
-        self.fc3 = nn.Linear(hidden_features, out_features)
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        #self.act2 = act_layer()
+        #self.fc3 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
         x = self.fc1(x); x = self.act1(x); x = self.drop(x)
-        x = self.fc2(x); x = self.act2(x); x = self.drop(x)
-        x = self.fc3(x); x = self.drop(x)
+        #x = self.fc2(x); x = self.act2(x); x = self.drop(x)
+        x = self.fc2(x); x = self.drop(x)
         return x
 
 # --- VS-DiT Block (Modified for Sequence Context) ---
@@ -107,8 +107,8 @@ class VS_DiT_Block(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
         self.norm3 = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
-        modulation_dim = hidden_dim * 9
-        self.modulation_mlp = nn.Sequential(nn.SiLU(), nn.Linear(hidden_dim, modulation_dim, bias=True))
+        #modulation_dim = hidden_dim * 6
+        #self.modulation_mlp = nn.Sequential(nn.SiLU(), nn.Linear(hidden_dim, modulation_dim, bias=True))
         # Context projection projects from context_dim to hidden_dim (applied on last dim of sequence)
         #self.context_proj = nn.Linear(context_dim, hidden_dim, bias=True)
         #nn.init.zeros_(self.context_proj.weight); nn.init.zeros_(self.context_proj.bias)
@@ -116,24 +116,25 @@ class VS_DiT_Block(nn.Module):
         # Cross attention kdim/vdim are now hidden_dim (after projection)
         self.cross_attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True, dropout=dropout, kdim=hidden_dim, vdim=hidden_dim)
         mlp_internal_dim = int(hidden_dim * mlp_ratio)
-        self.mlp = MLP(in_features=hidden_dim, hidden_features=mlp_internal_dim, out_features=hidden_dim, act_layer=nn.GELU, drop=dropout)
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
+        self.mlp = MLP(in_features=hidden_dim, hidden_features=mlp_internal_dim, out_features=hidden_dim, act_layer=approx_gelu, drop=0)
 
-    def _compute_modulation(self, t_emb):
-        modulation = self.modulation_mlp(t_emb)
-        mod = modulation.chunk(9, dim=1)
-        return mod
+    # def _compute_modulation(self, t_emb):
+    #     modulation = self.modulation_mlp(t_emb)
+    #     mod = modulation.chunk(6, dim=1)
+    #     return mod
 
     # --- MODIFIED forward signature ---
-    def forward(self, x, t_emb, context_seq, context_padding_mask=None):
+    def forward(self, x, gamma_1, beta_1, alpha_1, gamma_2, beta_2, alpha_2,  context_seq, context_padding_mask=None):
         # x: [B, hidden_dim]
         # t_emb: [B, hidden_dim]
         # context_seq: [B, S, context_dim] (e.g., last_hidden_state)
         # context_padding_mask: [B, S] (True where padded)
-        B, D_hidden = x.shape
-        gamma_1, beta_1, alpha_1, gamma_2, beta_2, alpha_2, gamma_3, beta_3, alpha_3 = self._compute_modulation(t_emb)
+        B, seq, D_hidden = x.shape
+        #gamma_1, beta_1, alpha_1, gamma_2, beta_2, alpha_2 = self._compute_modulation(t_emb)
 
         # Reshape latent input for attention: [B, 1, hidden_dim]
-        x_q = x.unsqueeze(1) # Use x_q for query in attentions
+        x_q = x # Use x_q for query in attentions
 
         # --- MODIFIED: Project the whole context sequence ---
         # Input context_seq shape: [B, S, context_dim]
@@ -144,34 +145,43 @@ class VS_DiT_Block(nn.Module):
 
         # --- Self-Attention on latent ---
         normed_x_sa = self.norm1(x_q)
-        mod_x_sa = normed_x_sa * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1)
+        mod_x_sa = normed_x_sa * (1 + gamma_1) + beta_1
         sa_out, _ = self.self_attn(mod_x_sa, mod_x_sa, mod_x_sa, need_weights=False)
-        x_q = x_q + alpha_1.unsqueeze(1) * sa_out # Residual update on the query sequence
+        x_q = x_q + alpha_1 * sa_out # Residual update on the query sequence
 
         # --- Cross-Attention (Query: latent, Key/Value: context sequence) ---
         normed_x_ca = self.norm2(x_q)
-        mod_x_ca = normed_x_ca * (1 + gamma_2.unsqueeze(1)) + beta_2.unsqueeze(1)
+        #mod_x_ca = normed_x_ca * (1 + gamma_2.unsqueeze(1)) + beta_2.unsqueeze(1)
         # --- MODIFIED: Pass full projected sequence and padding mask ---
         ca_out, _ = self.cross_attn(
-            query=mod_x_ca,
+            query=normed_x_ca,
             key=context_seq,
             value=context_seq,
             key_padding_mask=context_padding_mask, # Use the mask here
             need_weights=False
         )
-        x_q = x_q + alpha_2.unsqueeze(1) * ca_out # Residual update on the query sequence
+        #x_q = x_q + alpha_2.unsqueeze(1) * ca_out # Residual update on the query sequence
+        x_q = x_q + ca_out
 
         # --- FeedForward on latent ---
         normed_x_ff = self.norm3(x_q)
-        mod_x_ff = normed_x_ff * (1 + gamma_3.unsqueeze(1)) + beta_3.unsqueeze(1)
+        mod_x_ff = normed_x_ff * (1 + gamma_2) + beta_2
         ff_out = self.mlp(mod_x_ff)
-        x_q = x_q + alpha_3.unsqueeze(1) * ff_out # Residual update on the query sequence
+        x_q = x_q + alpha_2 * ff_out # Residual update on the query sequence
 
         # Return dimension [B, hidden_dim]
-        output = x_q.squeeze(1)
+        output = x_q
         return output
 
 # --- VS-DiT Model (Modified for Sequence Context) ---
+
+def get_sinusoidal_pos_embed(seq_len, dim, device):
+    position = torch.arange(seq_len, dtype=torch.float, device=device).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, dim, 2, device=device).float() * (-math.log(10000.0) / dim))
+    pe = torch.zeros(seq_len, dim, device=device)
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    return pe  # [seq_len, dim]
 
 class VS_DiT(nn.Module):
     """ VS-DiT model accepting sequence context. """
@@ -181,6 +191,9 @@ class VS_DiT(nn.Module):
         self.t_embedder = TimestepEmbedder(hidden_size=hidden_dim)
         self.proj_in = nn.Linear(latent_dim, hidden_dim)
         self.context_proj = nn.Linear(context_dim, hidden_dim, bias=True)
+        modulation_dim = hidden_dim * 6
+        self.modulation_mlp = nn.Sequential(nn.SiLU(), nn.Linear(hidden_dim, modulation_dim, bias=True))
+        
         self.blocks = nn.ModuleList([
             VS_DiT_Block(
                 hidden_dim=hidden_dim, context_dim=context_dim, num_heads=num_heads,
@@ -231,7 +244,7 @@ class VS_DiT(nn.Module):
             nn.init.normal_(self.final_modulation_mlp[-1].weight, std=0.02)
             nn.init.zeros_(self.final_modulation_mlp[-1].bias)
     
-    def initialize_weights(self):
+    def initialize_weights_v2(self):
             
             # 1. Basic initialization for all linear layers (will be overridden for specific layers)
             def _basic_init(module):
@@ -250,7 +263,7 @@ class VS_DiT(nn.Module):
             # 3. Initialize context_proj to zeros (OVERRIDE _basic_init for this layer)
             #    This is CRITICAL for starting with context "off"
             if hasattr(self, 'context_proj'): # If it exists (it does in the seqcond version)
-                nn.init.xavier_uniform_(self.context_proj.weight)
+                nn.init.xavier_uniform_(self.context_proj.weight) # Small but non-zero initialization
                 #nn.init.constant_(self.context_proj.weight, 0) # Zero initialization
                 if self.context_proj.bias is not None:
                     nn.init.constant_(self.context_proj.bias, 0)
@@ -323,13 +336,66 @@ class VS_DiT(nn.Module):
             nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.01)
             nn.init.zeros_(self.t_embedder.mlp[2].bias)
     # --- MODIFIED forward signature ---
+    
+    def initialize_weights(self):
+        # ... (your preferred initialization, ensuring self.time_modulation_mlp's output layer is zero-init) ...
+        # Example for time_modulation_mlp:
+        if hasattr(self, 'time_modulation_mlp') and isinstance(self.time_modulation_mlp[-1], nn.Linear):
+            nn.init.constant_(self.time_modulation_mlp[-1].weight, 0)
+            if self.time_modulation_mlp[-1].bias is not None:
+                nn.init.constant_(self.time_modulation_mlp[-1].bias, 0)
+        # Other initializations as before for proj_in, context_proj (Xavier), final_proj (zero) etc.
+        
+        # Basic initialization for all linear layers
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        self.apply(_basic_init)
+
+        nn.init.xavier_uniform_(self.proj_in.weight)
+        #if self.proj_in.bias is not None: nn.init.constant_(self.proj_in.bias, 0)
+        
+        nn.init.xavier_uniform_(self.context_proj.weight)
+        if self.context_proj.bias is not None: nn.init.constant_(self.context_proj.bias, 0)
+
+        if hasattr(self.t_embedder, 'mlp'):
+            nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+            if self.t_embedder.mlp[0].bias is not None: nn.init.constant_(self.t_embedder.mlp[0].bias,0)
+            nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+            if self.t_embedder.mlp[2].bias is not None: nn.init.constant_(self.t_embedder.mlp[2].bias, 0)
+
+        # Zero-out final linear layer of time_modulation_mlp
+        if hasattr(self, 'time_modulation_mlp') and isinstance(self.time_modulation_mlp[-1], nn.Linear):
+            nn.init.constant_(self.time_modulation_mlp[-1].weight, 0)
+            if self.time_modulation_mlp[-1].bias is not None:
+                nn.init.constant_(self.time_modulation_mlp[-1].bias, 0)
+        
+        # Zero-out final_modulation_mlp and final_proj
+        if isinstance(self.final_modulation_mlp[-1], nn.Linear):
+            nn.init.constant_(self.final_modulation_mlp[-1].weight, 0)
+            if self.final_modulation_mlp[-1].bias is not None:
+                nn.init.constant_(self.final_modulation_mlp[-1].bias, 0)
+        nn.init.constant_(self.final_proj.weight, 0)
+        if self.final_proj.bias is not None:
+            nn.init.constant_(self.final_proj.bias, 0)
+    
+    def _compute_modulation(self, t_emb):
+        modulation = self.modulation_mlp(t_emb)
+        mod = modulation.chunk(6, dim=1)
+        return mod
+    
     def forward(self, z_t, t, context_seq, context_padding_mask=None):
         # z_t: [B, latent_dim]
         # t: [B]
         # context_seq: [B, S, context_dim]
         # context_padding_mask: [B, S]
         model_device = next(self.parameters()).device
-        z_t = z_t.to(model_device); t = t.to(model_device)
+        pos_embed = get_sinusoidal_pos_embed(z_t.size(1), z_t.size(2), z_t.device)  # [seq_len, latent_dim]
+        z_t = z_t.to(model_device) + pos_embed.unsqueeze(0)  # [B, seq_len, latent_dim]
+        #z_t = z_t.to(model_device); 
+        t = t.to(model_device)
         context_seq = context_seq.to(model_device)
         if context_padding_mask is not None:
             context_padding_mask = context_padding_mask.to(model_device)
@@ -339,10 +405,12 @@ class VS_DiT(nn.Module):
 
         # --- MODIFIED: Project context sequence to hidden_dim ---
         proj_context_seq = self.context_proj(context_seq) # Output: [B, S, hidden_dim]
+        
+        gamma_1, beta_1, alpha_1, gamma_2, beta_2, alpha_2 = self._compute_modulation(t_emb)
 
         # --- MODIFIED: Pass sequence context and mask to blocks ---
         for block in self.blocks:
-            h = block(h, t_emb, proj_context_seq, context_padding_mask) # Output: [B, hidden_dim]
+            h = block(h, gamma_1, beta_1, alpha_1, gamma_2, beta_2, alpha_2 ,  proj_context_seq, context_padding_mask) # Output: [B, hidden_dim]
 
         final_gamma, final_beta = self.final_modulation_mlp(t_emb).chunk(2, dim=1)
         normed_h = self.final_norm(h)
@@ -369,8 +437,8 @@ def precompute_diffusion_parameters(betas, target_device):
 
 def noise_latent(z0, t, diff_params, target_device):
     z0 = z0.to(target_device); t = t.to(target_device)
-    sqrt_alpha_bar = diff_params["sqrt_alphas_cumprod"][t].view(-1, 1)
-    sqrt_one_minus_alpha_bar = diff_params["sqrt_one_minus_alphas_cumprod"][t].view(-1, 1)
+    sqrt_alpha_bar = diff_params["sqrt_alphas_cumprod"][t].view(-1,1, 1)
+    sqrt_one_minus_alpha_bar = diff_params["sqrt_one_minus_alphas_cumprod"][t].view(-1,1, 1)
     epsilon = torch.randn_like(z0, device=target_device)
     zt = sqrt_alpha_bar * z0 + sqrt_one_minus_alpha_bar * epsilon
     return zt, epsilon
@@ -494,7 +562,7 @@ def ddim_sample_v1(model, shape, context_seq, context_padding_mask,
     return z_t
 
 @torch.no_grad()
-def ddim_sample(model, shape, context_seq, context_padding_mask,
+def ddim_sample_v2(model, shape, context_seq, context_padding_mask,
                 diff_params, num_timesteps, target_device, cfg_scale=3.0, eta=0.0, clip_model=None, clip_tokenizer=None):
     """DDIM sampling with correct formulation."""
     model.eval()
@@ -624,7 +692,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 @torch.no_grad()
-def ddim_sample_v3(model, shape, context_seq, context_padding_mask,
+def ddim_sample(model, shape, context_seq, context_padding_mask,
                 diff_params, num_timesteps, target_device, cfg_scale=3.0, eta=0.0, 
                 clip_model=None, clip_tokenizer=None, return_visuals=True):
 
@@ -777,7 +845,7 @@ def dpm_solver_2m_20_steps(
     cfg_scale: float = 3.0,
     device: torch.device = torch.device("cpu"),
     seed: int = 42,
-    latent_min_max=(-8,8) 
+    latent_min_max=(-8,6) 
 ):
     """
     DPM-Solver (2nd order, multistep-like) for exactly 20 inference steps.
