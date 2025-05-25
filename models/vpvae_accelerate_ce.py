@@ -140,11 +140,18 @@ class VPVAEEncoder(nn.Module):
         x = self.cross_attn_norm(svg_projected + cross_attn_output)
         if svg_padding_mask is not None: x = x * (~svg_padding_mask).unsqueeze(-1).float()
         for layer in self.self_attention_layers: x = layer(x, padding_mask=svg_padding_mask)
+        # if svg_padding_mask is not None:
+        #     valid_mask = (~svg_padding_mask).unsqueeze(-1).float()
+        #     pooled_x = (x * valid_mask).sum(dim=1) / (valid_mask.sum(dim=1) + 1e-9)
+        # else: pooled_x = torch.mean(x, dim=1)
+        # mu = self.fc_mu(pooled_x); log_var = self.fc_var(pooled_x)
+        mu = self.fc_mu(x); 
+        log_var = self.fc_var(x)
+        
         if svg_padding_mask is not None:
-            valid_mask = (~svg_padding_mask).unsqueeze(-1).float()
-            pooled_x = (x * valid_mask).sum(dim=1) / (valid_mask.sum(dim=1) + 1e-9)
-        else: pooled_x = torch.mean(x, dim=1)
-        mu = self.fc_mu(pooled_x); log_var = self.fc_var(pooled_x)
+            valid_mask = (~svg_padding_mask).unsqueeze(-1).float()  # [B, seq_len, 1]
+            mu = mu * valid_mask
+            log_var = log_var * valid_mask
         return mu, log_var
 
 class VPVAEDecoder(nn.Module):
@@ -170,7 +177,8 @@ class VPVAEDecoder(nn.Module):
         ])
 
     def forward(self, z, target_len):
-        batch_size=z.size(0); x=self.fc_latent(z).unsqueeze(1); x=x.repeat(1, target_len, 1)
+        batch_size=z.size(0); x=self.fc_latent(z); 
+        #x=x.repeat(1, target_len, 1)
         effective_target_len = min(target_len, self.max_seq_len); x_rope = apply_rope(x[:,:effective_target_len,:])
         causal_mask=torch.triu(torch.ones(effective_target_len, effective_target_len, device=z.device), diagonal=1).bool()
         for layer in self.decoder_layers: x_rope=layer(x_rope, padding_mask=None, attn_mask=causal_mask)
@@ -390,7 +398,7 @@ def main():
         "learning_rate": 3e-4, "total_steps": 20000, "batch_size_per_device": 32,
         "warmup_steps": 300, "lr_decay_min": 1.5e-5, "weight_decay": 0.1,
         "log_interval": 10, "eval_interval": 100,
-        "latent_dim": 128, "encoder_layers": 4, "decoder_layers": 4,
+        "latent_dim": 256, "encoder_layers": 4, "decoder_layers": 4,
         "encoder_d_model": 512, "decoder_d_model": 512,
         "element_embed_dim": 64, "command_embed_dim": 64,
         "num_other_continuous_svg_features": num_other_continuous_features, # For encoder and decoder
