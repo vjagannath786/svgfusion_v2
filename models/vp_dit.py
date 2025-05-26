@@ -393,9 +393,9 @@ class VS_DiT(nn.Module):
         # context_seq: [B, S, context_dim]
         # context_padding_mask: [B, S]
         model_device = next(self.parameters()).device
-        #pos_embed = get_sinusoidal_pos_embed(z_t.size(1), z_t.size(2), z_t.device)  # [seq_len, latent_dim]
-        #z_t = z_t.to(model_device) + pos_embed.unsqueeze(0)  # [B, seq_len, latent_dim]
-        z_t = apply_rope(z_t)
+        pos_embed = get_sinusoidal_pos_embed(z_t.size(1), z_t.size(2), z_t.device)  # [seq_len, latent_dim]
+        z_t = z_t.to(model_device) + pos_embed.unsqueeze(0)  # [B, seq_len, latent_dim]
+        #z_t = apply_rope(z_t)
         #z_t = z_t.to(model_device); 
         t = t.to(model_device)
         context_seq = context_seq.to(model_device)
@@ -946,6 +946,68 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
 
     # Return z_t and optionally the tracked stats
     return z_t, {"cosine_sims": cosine_sims, "cfg_scales": cfg_scales_used} # Use cfg_scales_used
+
+
+@torch.no_grad()
+def ddim_sample_improved(model, shape, context_seq, context_padding_mask,
+                        diff_params, num_timesteps, target_device, 
+                        cfg_scale=3.0, eta=0.0,
+                        clip_model=None, clip_tokenizer=None, return_visuals=True,):
+    model.eval()
+    z_t = torch.randn(shape, device=target_device)
+    batch_size = shape[0]
+    
+    # Empty text for unconditional context
+    # Assuming context_seq is [B, S_text, D_clip]
+    text_seq_len = context_seq.size(1)
+    empty_text_inputs = clip_tokenizer(
+        [""] * batch_size, # Create a batch of empty strings
+        padding='max_length',
+        max_length=text_seq_len, # Match text sequence length for consistency
+        truncation=True,
+        return_tensors="pt"
+    ).to(target_device)
+
+    empty_outputs = clip_model(**empty_text_inputs)
+    uncond_context_seq = empty_outputs.last_hidden_state # [B, S_text, D_clip]
+    uncond_padding_mask = ~(empty_text_inputs.attention_mask.bool()) # [B, S_text]
+    
+    timesteps = range(num_timesteps-1, -1, -1)
+    for i in tqdm(timesteps):
+        t = torch.full((shape[0],), i, device=target_device)
+        
+        # Proper broadcasting for sequential latents
+        alpha_t = diff_params["alphas_cumprod"][t].view(-1, 1, 1)
+        alpha_t_prev = diff_params["alphas_cumprod_prev"][t].view(-1, 1, 1)
+        
+        # Predict noise
+        eps_cond = model(z_t, t, context_seq, context_padding_mask)
+        eps_uncond = model(z_t, t, uncond_context_seq, uncond_padding_mask)
+        eps_pred = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
+        
+        # DDIM equations
+        x0_pred = (z_t - torch.sqrt(1 - alpha_t) * eps_pred) / torch.sqrt(alpha_t)
+        x0_pred = torch.clamp(x0_pred, -3, 3)  # Stable range
+        
+        # Compute variance
+        sigma_t = eta * torch.sqrt(
+            (1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t/alpha_t_prev)
+        )
+        
+        # Direction term
+        pred_dir = torch.sqrt(1 - alpha_t_prev - sigma_t**2) * eps_pred
+        
+        # Previous sample
+        z_prev = torch.sqrt(alpha_t_prev) * x0_pred + pred_dir
+        
+        if eta > 0:
+            z_prev = z_prev + sigma_t * torch.randn_like(z_t)
+            
+        z_t = z_prev
+        
+    return z_t
+
+
 
 @torch.no_grad()
 def get_clip_embeddings_seqcond_dpm(prompt, uncond_prompt, clip_model, clip_tokenizer, device, batch_size=1):

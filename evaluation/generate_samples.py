@@ -27,7 +27,7 @@ try:
     # Ensure VS_DiT is the version that processes sequential latents
     # and that ddim_sample/dpm_solver handle these shapes
     from models import VS_DiT
-    from models import get_linear_noise_schedule, precompute_diffusion_parameters, ddim_sample, dpm_solver_2m_20_steps
+    from models import get_linear_noise_schedule, precompute_diffusion_parameters, ddim_sample, dpm_solver_2m_20_steps, ddim_sample_improved
     print("Successfully imported VS-DiT (SeqCond) model and diffusion utilities.")
 except ImportError as e:
     print(f"Error importing DiT model/utils: {e}"); exit()
@@ -49,7 +49,7 @@ except ImportError as e:
 
 # --- Paths ---
 PATH_VAE_CHECKPOINT = '/home/model_weights/vp_vae_accel_hybrid_light-feather-36_s5000_best.pt' # VAE trained with sequential latents
-PATH_VSDIT_CHECKPOINT = "/home/saved_models_vsdit_clip/vsdit_clip_seqcond_sweet-galaxy-60_best.pth" # DiT trained with sequential latents
+PATH_VSDIT_CHECKPOINT = "/home/saved_models_vsdit_clip/vsdit_clip_seqcond_fresh-haze-66_best.pth" # DiT trained with sequential latents
 PATH_CLIP_MODEL = "/home/clip_model/clip-vit-large-patch14"
 OUTPUT_DIR = "./generated_svgs_vsdit_seqcond_sequential_latent" # New output dir
 
@@ -69,13 +69,13 @@ VSDIT_HIDDEN_DIM = 384
 VSDIT_CONTEXT_DIM = 768
 VSDIT_NUM_BLOCKS = 12
 VSDIT_NUM_HEADS = 6
-VSDIT_MLP_RATIO = 4.0 # Or 8.0 if that was your S-model config
+VSDIT_MLP_RATIO = 8.0 # Or 8.0 if that was your S-model config
 VSDIT_DROPOUT = 0.0
 
 DIFFUSION_NUM_TIMESTEPS = 1000
-SAMPLING_NUM_STEPS_DDIM = 1000 # Fewer steps for DDIM if preferred, or 1000 for quality
+SAMPLING_NUM_STEPS_DDIM = 100 # Fewer steps for DDIM if preferred, or 1000 for quality
 SAMPLING_NUM_STEPS_DPM = 20   # For DPM-Solver
-SAMPLING_CFG_SCALE = 1.5
+SAMPLING_CFG_SCALE = 3
 SAMPLING_ETA = 0.0
 
 # --- VAE parameters (should match the loaded VAE) ---
@@ -90,7 +90,7 @@ PARAM_TYPES = { 0: 'coord', 1: 'coord', 2: 'coord', 3: 'coord', 4: 'rgb', 5: 'rg
 
 
 # --- Setup Device ---
-if torch.cuda.is_available(): device = torch.device("cuda")
+if torch.cuda.is_available(): device = torch.device("cuda:1")
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): device = torch.device("mps")
 else: device = torch.device("cpu")
 print(f"Using device: {device}")
@@ -251,7 +251,7 @@ def generate_svg_from_prompt(
     # 2.A. Sample Latents using DDIM
     print(f"Sampling latents using DDIM ({ddim_steps} steps)...")
     # sub_diff_params, _ = get_sub_schedule(ddim_diff_params, dpm_total_train_timesteps, ddim_steps) # dpm_total_train_timesteps is just T
-    sampled_latents_ddim, _ = ddim_sample( # Assuming ddim_sample is updated for sequential latents
+    sampled_latents_ddim  = ddim_sample_improved( # Assuming ddim_sample is updated for sequential latents
         model=vs_dit_model,
         shape=latent_shape,
         context_seq=context_sequence,
@@ -280,7 +280,7 @@ def generate_svg_from_prompt(
     #     betas=dpm_betas, # Pass the full beta schedule
     #     cfg_scale=cfg_scale,
     #     device=device,
-    #     seed=random.randint(0, 2**32 - 1) # Give a random seed per call or fix
+    #     seed=42 # Give a random seed per call or fix
     # )
     # sampled_latents = sampled_latents_dpm # Choose DPM solver output
 
@@ -331,7 +331,7 @@ def generate_svg_from_prompt(
 # Main Execution Block
 # =============================================================================
 if __name__ == "__main__":
-    prompts_to_generate = [ "a red bird with a yellow beak and two yellow legs"] # "a smiling emoji face", "an arrow pointing right"
+    prompts_to_generate = [ "a red circle"] # "a smiling emoji face", "an arrow pointing right"
     n_samples_per_prompt = 5 # For quicker testing
 
     svg_tensor_converter_instance = SVGToTensor_Normalized() # For SVG final processing
