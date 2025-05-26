@@ -15,7 +15,7 @@ import random
 import wandb
 import os
 import sys
-sys.path.append(".")
+sys.path.append("/home/svgfusion_v2/models/")
 
 # --- Import Model and Utils from test_vsdit_hidden_seqcond.py ---
 # Make sure the correct file with sequence conditioning model is imported
@@ -104,9 +104,9 @@ if __name__ == "__main__":
         config={
             # Training Params
             "learning_rate": 2e-4, # Adjusted as per paper text
-            "total_steps": 10000,  # Increased training steps
-            "batch_size": 32,     # Adjusted batch size
-            "warmup_steps": 200, # Adjusted warmup
+            "total_steps": 1500,  # Increased training steps
+            "batch_size": 64,     # Adjusted batch size
+            "warmup_steps": 50, # Adjusted warmup
             "lr_decay_min": 2e-6,# Adjusted as per paper text
             "weight_decay": 0.1,   # Adjusted as per paper text
             "log_interval": 10,
@@ -124,7 +124,7 @@ if __name__ == "__main__":
             "context_dim": 768,       # CLIP ViT-B/32 last_hidden_state is 768
             "num_blocks": 12,         # Like VP-DiT S
             "num_heads": 6,           # hidden_dim=384 divisible by 6
-            "mlp_ratio": 8.0,         # Using deeper MLP ratio from discussion
+            "mlp_ratio": 4.0,         # Using deeper MLP ratio from discussion
             "dropout": 0.1,
 
             # Diffusion Params
@@ -134,9 +134,9 @@ if __name__ == "__main__":
             "ddim_eta": 0.0,
 
             # Data/Paths
-            "z_dataset_path": "./datasets/zdataset_vpvae_ce.pt",
-            "clip_model_path": "/Users/varun_jagannath/Documents/D/test python/clip-vit-large-patch14", # Using Large CLIP
-            "output_model_dir": "saved_models_vsdit_clip_seqcond" # New directory
+            "z_dataset_path": "/home/svgfusion_v2/dataset/zdataset_vpvae.pt",
+            "clip_model_path": "/home/clip_model/clip-vit-large-patch14/", # Using Large CLIP
+            "output_model_dir": "saved_models_vsdit_clip" # New directory
         }
     )
     config = wandb.config
@@ -323,6 +323,7 @@ if __name__ == "__main__":
             except Exception as e: print(f"Dataloader error: {e}"); continue
 
             z0_batch = batch['z'].to(target_device)
+            #print(z0_batch.shape)
             text_prompts = batch['text']
             optimizer.zero_grad()
 

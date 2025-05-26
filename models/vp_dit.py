@@ -131,6 +131,7 @@ class VS_DiT_Block(nn.Module):
         # context_seq: [B, S, context_dim] (e.g., last_hidden_state)
         # context_padding_mask: [B, S] (True where padded)
         B, seq, D_hidden = x.shape
+        #print(x.shape)
         #gamma_1, beta_1, alpha_1, gamma_2, beta_2, alpha_2 = self._compute_modulation(t_emb)
 
         # Reshape latent input for attention: [B, 1, hidden_dim]
@@ -145,9 +146,9 @@ class VS_DiT_Block(nn.Module):
 
         # --- Self-Attention on latent ---
         normed_x_sa = self.norm1(x_q)
-        mod_x_sa = normed_x_sa * (1 + gamma_1) + beta_1
+        mod_x_sa = normed_x_sa * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1)
         sa_out, _ = self.self_attn(mod_x_sa, mod_x_sa, mod_x_sa, need_weights=False)
-        x_q = x_q + alpha_1 * sa_out # Residual update on the query sequence
+        x_q = x_q + alpha_1.unsqueeze(1) * sa_out # Residual update on the query sequence
 
         # --- Cross-Attention (Query: latent, Key/Value: context sequence) ---
         normed_x_ca = self.norm2(x_q)
@@ -165,9 +166,9 @@ class VS_DiT_Block(nn.Module):
 
         # --- FeedForward on latent ---
         normed_x_ff = self.norm3(x_q)
-        mod_x_ff = normed_x_ff * (1 + gamma_2) + beta_2
+        mod_x_ff = normed_x_ff * (1 + gamma_2.unsqueeze(1)) + beta_2.unsqueeze(1)
         ff_out = self.mlp(mod_x_ff)
-        x_q = x_q + alpha_2 * ff_out # Residual update on the query sequence
+        x_q = x_q + alpha_2.unsqueeze(1) * ff_out # Residual update on the query sequence
 
         # Return dimension [B, hidden_dim]
         output = x_q
@@ -414,7 +415,7 @@ class VS_DiT(nn.Module):
 
         final_gamma, final_beta = self.final_modulation_mlp(t_emb).chunk(2, dim=1)
         normed_h = self.final_norm(h)
-        mod_h = normed_h * (1 + final_gamma) + final_beta
+        mod_h = normed_h * (1 + final_gamma.unsqueeze(1)) + final_beta.unsqueeze(1)
         epsilon_pred = self.final_proj(mod_h) # Output: [B, latent_dim]
         return epsilon_pred
 
@@ -699,6 +700,7 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
     model.eval()
     batch_size = shape[0]
     z_t = torch.randn(shape, device=target_device)
+    print(z_t.shape)
 
     # Move context to device
     context_seq = context_seq.to(target_device)
