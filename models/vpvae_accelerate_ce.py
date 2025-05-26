@@ -97,6 +97,7 @@ class VPVAEEncoder(nn.Module):
         self.pixel_projection = nn.Linear(pixel_feature_dim, d_model)
         #self.svg_norm_pre_proj = nn.LayerNorm(self.svg_input_feature_dim)
         #self.pixel_norm_pre_proj = nn.LayerNorm(pixel_feature_dim)
+        self.downsample = nn.Conv1d(d_model, d_model, kernel_size=4, stride=4)
 
         self.cross_attention = MultiHeadAttention(d_model=d_model, num_heads=num_heads, kdim=d_model, vdim=d_model, batch_first=True)
         self.cross_attn_norm = nn.LayerNorm(d_model)
@@ -145,9 +146,12 @@ class VPVAEEncoder(nn.Module):
         #     pooled_x = (x * valid_mask).sum(dim=1) / (valid_mask.sum(dim=1) + 1e-9)
         # else: pooled_x = torch.mean(x, dim=1)
         # mu = self.fc_mu(pooled_x); log_var = self.fc_var(pooled_x)
-        x = x.transpose(1, 2)  # [B, d_model, 1024]
-        x = F.avg_pool1d(x, kernel_size=4, stride=4)  # [B, d_model, 256]
-        x = x.transpose(1, 2)  # [B, 256, d_model]
+        #x = x.transpose(1, 2)  # [B, d_model, 1024]
+        #x = F.avg_pool1d(x, kernel_size=4, stride=4)  # [B, d_model, 256]
+        #x = x.transpose(1, 2)  # [B, 256, d_model]
+        x = x.transpose(1, 2)      # [B, d_model, 1024]
+        x = self.downsample(x)     # [B, d_model, 256]
+        x = x.transpose(1, 2)      # [B, 256, d_model]
         
         
         
@@ -163,6 +167,7 @@ class VPVAEEncoder(nn.Module):
             #valid_mask = (~svg_padding_mask).unsqueeze(-1).float()  # [B, seq_len, 1]
             mu = mu * valid_mask
             log_var = log_var * valid_mask
+        #print(mu.shape)
         return mu, log_var
 
 class VPVAEDecoder(nn.Module):
@@ -183,16 +188,23 @@ class VPVAEDecoder(nn.Module):
         #     nn.Linear(d_model // 2, num_other_continuous_params_to_reconstruct),
         #     nn.Tanh() 
         # )
+        self.upsample = nn.ConvTranspose1d(d_model, d_model, kernel_size=4, stride=4)
         self.param_heads = nn.ModuleList([
             nn.Linear(d_model, num_bins) for _ in range(num_other_continuous_params_to_reconstruct)
         ])
 
     def forward(self, z, target_len):
+        #print("z shape")
+        #print(z.shape)
         batch_size=z.size(0); x=self.fc_latent(z); 
         #x=x.repeat(1, target_len, 1)
         #effective_target_len = min(target_len, self.max_seq_len); 
-        x_upsampled = F.interpolate(x.transpose(1, 2), size=target_len, mode="linear", align_corners=False).transpose(1, 2)
-        x = x_upsampled
+        #x_upsampled = F.interpolate(x.transpose(1, 2), size=target_len, mode="linear", align_corners=False).transpose(1, 2)
+        x = self.fc_latent(z)      # [B, 256, d_model]
+        x = x.transpose(1, 2)      # [B, d_model, 256]
+        x = self.upsample(x)       # [B, d_model, 1024]
+        x = x.transpose(1, 2)      # [B, 1024, d_model]
+        #x = x_upsampled
         effective_target_len = min(target_len, self.max_seq_len);
         x_rope = apply_rope(x[:,:effective_target_len,:])
         causal_mask=torch.triu(torch.ones(effective_target_len, effective_target_len, device=z.device), diagonal=1).bool()
@@ -203,7 +215,8 @@ class VPVAEDecoder(nn.Module):
         command_type_logits = self.command_type_head(x_normed)
         #predicted_other_continuous_params = self.other_continuous_params_head(x_normed)
         param_logits_list = [head(x_normed) for head in self.param_heads]
-        
+        #print("element shape")
+        #print(element_type_logits.shape)
         return element_type_logits, command_type_logits, param_logits_list
 
 class VPVAE(nn.Module):
