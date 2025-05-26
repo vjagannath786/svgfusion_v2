@@ -191,7 +191,9 @@ class VPVAEDecoder(nn.Module):
         batch_size=z.size(0); x=self.fc_latent(z); 
         #x=x.repeat(1, target_len, 1)
         #effective_target_len = min(target_len, self.max_seq_len); 
-        effective_target_len = 256
+        x_upsampled = F.interpolate(x.transpose(1, 2), size=target_len, mode="linear", align_corners=False).transpose(1, 2)
+        x = x_upsampled
+        effective_target_len = min(target_len, self.max_seq_len);
         x_rope = apply_rope(x[:,:effective_target_len,:])
         causal_mask=torch.triu(torch.ones(effective_target_len, effective_target_len, device=z.device), diagonal=1).bool()
         for layer in self.decoder_layers: x_rope=layer(x_rope, padding_mask=None, attn_mask=causal_mask)
