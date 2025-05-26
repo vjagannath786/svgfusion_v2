@@ -8,7 +8,7 @@ import os
 import sys
 import traceback
 
-sys.path.append(".")
+sys.path.append("/home/svgfusion_v2/")
 
 try:
     from models import VPVAE, set_seed
@@ -17,14 +17,14 @@ except ImportError as e:
     print(f"CRITICAL ERROR importing VPVAE or SVGToTensor_Normalized: {e}")
     sys.exit(1)
     
-PRECOMPUTED_DATA_PATH = './datasets/optimized_progressive_dataset_precomputed_v8.pt' 
-MODEL_PATH = './best_models/vp_vae_accel_hybrid_good-eon-3_s19400_best.pt'
-OUTPUT_Z_DATASET_PATH = 'zdataset_vpvae_ce.pt'
+PRECOMPUTED_DATA_PATH = '/home/svgfusion_v2/dataset/optimized_progressive_dataset_precomputed_v8.pt' 
+MODEL_PATH = '/home/model_weights/vp_vae_accel_hybrid_glorious-galaxy-31_s5000_best.pt'
+OUTPUT_Z_DATASET_PATH = 'zdataset_vpvae.pt'
 
 
 import json
 
-with open('./svg_captions.json', 'r') as f:
+with open('/home/svg_captions.json', 'r') as f:
     svg_captions = json.load(f)
     
 
@@ -79,8 +79,8 @@ if __name__ == "__main__":
         "command_embed_dim": 64,  
         "num_other_continuous_svg_features": 12,
         "pixel_feature_dim": 384, 
-        "encoder_d_model": 512,   
-        "decoder_d_model": 512,   
+        "encoder_d_model": 256,   
+        "decoder_d_model": 256,   
         "encoder_layers": 4,      
         "decoder_layers": 4,      
         "num_heads": 8,           
@@ -205,11 +205,11 @@ if __name__ == "__main__":
                 
                 mu, log_var = model.encoder(svg_batch, pix_batch, svg_mask_batch, svg_mask_batch)
                 z = mu
-                #print(f"z shape: {z.squeeze(0).shape}")
+                print(f"z shape: {z.squeeze(0).shape}")
                 
                 z_data_list.append({
                     'filename': filename_stem,
-                    'z': z.squeeze(0)
+                    'z': z.squeeze(0).cpu().detach()
                 })
             except Exception as e:
                 print(f"Error processing item {filename_stem}: {e}")
