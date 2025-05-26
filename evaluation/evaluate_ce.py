@@ -28,7 +28,7 @@ except ImportError as e:
 # --- Paths and Config ---
 # Path to the precomputed data list (output of dataset_preparation_dynamic.py using HYBRID format)
 PRECOMPUTED_DATA_PATH = '/home/svgfusion_v2/dataset/optimized_progressive_dataset_precomputed_v8.pt' # ADJUST IF NEEDED
-MODEL_PATH = '/home/best_models/vp_vae_accel_hybrid_good-eon-3_s19000_best.pt' # !!! REPLACE WITH YOUR ACTUAL HYBRID MODEL PATH !!!
+MODEL_PATH = '/home/model_weights/vp_vae_accel_hybrid_light-feather-36_s5000_best.pt' # !!! REPLACE WITH YOUR ACTUAL HYBRID MODEL PATH !!!
 OUTPUT_DIR = 'vae_reconstructions_eval' # New output dir name
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -159,10 +159,10 @@ if __name__ == "__main__":
     ## if umbrella in precomputed_data_list_for_eval[0]['file_name_stem']:
 
     # Filter for items with 'umbrella' in the filename stem
-    umbrella_items = [item for item in precomputed_data_list_for_eval if 'crab' in item['file_name_stem']]
+    umbrella_items = [item for item in precomputed_data_list_for_eval if 'banana' in item['file_name_stem']]
     if umbrella_items:
         eval_items_list = umbrella_items
-        print(f"Found {len(eval_items_list)} SVGs with 'umbrella' in filename.")
+        print(f"Found {len(eval_items_list)} SVGs with 'zebra' in filename.")
     else:
         num_samples_to_evaluate = min(5, len(precomputed_data_list_for_eval))
         eval_items_list = precomputed_data_list_for_eval[:num_samples_to_evaluate]

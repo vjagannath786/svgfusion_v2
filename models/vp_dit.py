@@ -86,15 +86,15 @@ class MLP(nn.Module):
         hidden_features = hidden_features or in_features
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.act1 = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
-        #self.act2 = act_layer()
-        #self.fc3 = nn.Linear(hidden_features, out_features)
+        self.fc2 = nn.Linear(hidden_features, hidden_features)
+        self.act2 = act_layer()
+        self.fc3 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
         x = self.fc1(x); x = self.act1(x); x = self.drop(x)
-        #x = self.fc2(x); x = self.act2(x); x = self.drop(x)
-        x = self.fc2(x); x = self.drop(x)
+        x = self.fc2(x); x = self.act2(x); x = self.drop(x)
+        x = self.fc3(x); x = self.drop(x)
         return x
 
 # --- VS-DiT Block (Modified for Sequence Context) ---
@@ -393,8 +393,9 @@ class VS_DiT(nn.Module):
         # context_seq: [B, S, context_dim]
         # context_padding_mask: [B, S]
         model_device = next(self.parameters()).device
-        pos_embed = get_sinusoidal_pos_embed(z_t.size(1), z_t.size(2), z_t.device)  # [seq_len, latent_dim]
-        z_t = z_t.to(model_device) + pos_embed.unsqueeze(0)  # [B, seq_len, latent_dim]
+        #pos_embed = get_sinusoidal_pos_embed(z_t.size(1), z_t.size(2), z_t.device)  # [seq_len, latent_dim]
+        #z_t = z_t.to(model_device) + pos_embed.unsqueeze(0)  # [B, seq_len, latent_dim]
+        z_t = apply_rope(z_t)
         #z_t = z_t.to(model_device); 
         t = t.to(model_device)
         context_seq = context_seq.to(model_device)
@@ -693,14 +694,14 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 @torch.no_grad()
-def ddim_sample(model, shape, context_seq, context_padding_mask,
+def ddim_sample_v4(model, shape, context_seq, context_padding_mask,
                 diff_params, num_timesteps, target_device, cfg_scale=3.0, eta=0.0, 
                 clip_model=None, clip_tokenizer=None, return_visuals=True):
 
     model.eval()
     batch_size = shape[0]
-    z_t = torch.randn(shape, device=target_device)
-    print(z_t.shape)
+    z_t = torch.randn(shape, device=target_device) 
+    #print(z_t.shape)
 
     # Move context to device
     context_seq = context_seq.to(target_device)
@@ -719,8 +720,8 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
 
     empty_outputs = clip_model(**empty_text)
     uncond_context_seq = empty_outputs.last_hidden_state
-    uncond_context_seq = uncond_context_seq.repeat(batch_size, 1, 1)
-    uncond_padding_mask = ~(empty_text.attention_mask.bool()).repeat(batch_size, 1)
+    uncond_context_seq = uncond_context_seq.repeat(batch_size, 1, 1, 1)
+    uncond_padding_mask = ~(empty_text.attention_mask.bool()).repeat(batch_size,1, 1)
 
     # Track values for plotting
     cosine_sims = []
@@ -729,10 +730,10 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
 
     for i in tqdm(reversed(range(num_timesteps)), desc="DDIM Sampling"):
         t = torch.full((batch_size,), i, dtype=torch.long, device=target_device)
-        alpha_bar_t = diff_params["alphas_cumprod"][t].view(-1, 1)
-        alpha_bar_t_prev = diff_params["alphas_cumprod_prev"][t].view(-1, 1)
-        sqrt_one_minus_alpha_bar_t = diff_params["sqrt_one_minus_alphas_cumprod"][t].view(-1, 1)
-        sqrt_alpha_bar_t = diff_params["sqrt_alphas_cumprod"][t].view(-1, 1)
+        alpha_bar_t = diff_params["alphas_cumprod"][t].view(-1,1, 1)
+        alpha_bar_t_prev = diff_params["alphas_cumprod_prev"][t].view(-1,1, 1)
+        sqrt_one_minus_alpha_bar_t = diff_params["sqrt_one_minus_alphas_cumprod"][t].view(-1, 1,1)
+        sqrt_alpha_bar_t = diff_params["sqrt_alphas_cumprod"][t].view(-1,1, 1)
 
         eps_cond = model(z_t, t, context_seq, context_padding_mask)
         eps_uncond = model(z_t, t, uncond_context_seq, uncond_padding_mask)
@@ -764,7 +765,7 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
         )
 
         pred_x0 = (z_t - sqrt_one_minus_alpha_bar_t * eps_pred) / sqrt_alpha_bar_t
-        pred_x0 = torch.clamp(pred_x0, -8, 8)
+        pred_x0 = torch.clamp(pred_x0, -14, 14)
 
         dir_xt = torch.sqrt(alpha_bar_t_prev) * pred_x0
         noise_xt = torch.sqrt(1 - alpha_bar_t_prev - sigma_t ** 2) * eps_pred
@@ -808,6 +809,143 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
         "eps_stats": eps_stats
     }
 
+
+@torch.no_grad()
+def ddim_sample(model, shape, context_seq, context_padding_mask,
+                diff_params, num_timesteps, target_device, cfg_scale=3.0, eta=0.0,
+                clip_model=None, clip_tokenizer=None, return_visuals=True,
+                latent_min_max=(-14, 14)): # Added latent_min_max from your snippet
+
+    model.eval()
+    batch_size = shape[0]
+    # shape is now expected to be (batch_size, sequence_length_N, feature_dim_Dz)
+    z_t = torch.randn(shape, device=target_device)
+    # print(f"Initial z_t shape: {z_t.shape}") # Should be [B, N, Dz]
+
+    # Move context to device
+    context_seq = context_seq.to(target_device)
+    if context_padding_mask is not None:
+        context_padding_mask = context_padding_mask.to(target_device)
+
+    if clip_model is None or clip_tokenizer is None:
+        raise ValueError("clip_model and clip_tokenizer must be provided for ddim_sample.")
+
+    # Empty text for unconditional context
+    # Assuming context_seq is [B, S_text, D_clip]
+    text_seq_len = context_seq.size(1)
+    empty_text_inputs = clip_tokenizer(
+        [""] * batch_size, # Create a batch of empty strings
+        padding='max_length',
+        max_length=text_seq_len, # Match text sequence length for consistency
+        truncation=True,
+        return_tensors="pt"
+    ).to(target_device)
+
+    empty_outputs = clip_model(**empty_text_inputs)
+    uncond_context_seq = empty_outputs.last_hidden_state # [B, S_text, D_clip]
+    uncond_padding_mask = ~(empty_text_inputs.attention_mask.bool()) # [B, S_text]
+
+    # Error in your snippet: uncond_context_seq.repeat(batch_size, 1, 1, 1)
+    # If uncond_context_seq is already [B, S_text, D_clip] from tokenizing [""]*B, no further repeat is needed for batch.
+    # If it was [1, S_text, D_clip], then uncond_context_seq = uncond_context_seq.repeat(batch_size, 1, 1)
+    # Similarly for uncond_padding_mask.
+    # The code above for empty_text_inputs already produces batch_size items.
+
+    # Track values for plotting
+    cosine_sims = []
+    cfg_scales_used = [] # Renamed from cfg_scales to avoid conflict if this file also defines it
+    # eps_stats = [] # Not used in your snippet, but can be re-added
+
+    for i in tqdm(reversed(range(num_timesteps)), desc="DDIM Sampling (Sequential Latent)"):
+        t = torch.full((batch_size,), i, dtype=torch.long, device=target_device)
+
+        # Adjust broadcasting for alpha/sigma terms if z_t is [B, N, Dz]
+        # Original: alpha_bar_t[t] is scalar -> view(-1, 1) for [B, 1]
+        # New: alpha_bar_t[t] is scalar -> view(-1, 1, 1) for [B, 1, 1] to broadcast over N and Dz
+        alpha_bar_t_val = diff_params["alphas_cumprod"][t].view(-1, 1, 1)
+        alpha_bar_t_prev_val = diff_params["alphas_cumprod_prev"][t].view(-1, 1, 1)
+        sqrt_one_minus_alpha_bar_t_val = diff_params["sqrt_one_minus_alphas_cumprod"][t].view(-1, 1, 1)
+        sqrt_alpha_bar_t_val = diff_params["sqrt_alphas_cumprod"][t].view(-1, 1, 1)
+
+        # Model expects z_t: [B, N, Dz], t: [B], context_seq: [B, S_text, D_clip], context_padding_mask: [B, S_text]
+        # Model output eps_cond/eps_uncond should be [B, N, Dz]
+        eps_cond = model(z_t, t, context_seq, context_padding_mask)
+        eps_uncond = model(z_t, t, uncond_context_seq, uncond_padding_mask)
+
+        # Cosine similarity: flatten over sequence and feature dimensions
+        # eps_cond.flatten(1) will be [B, N*Dz]
+        cosine_sim = F.cosine_similarity(eps_cond.reshape(batch_size, -1),
+                                         eps_uncond.reshape(batch_size, -1),
+                                         dim=1).mean().item()
+        cosine_sims.append(cosine_sim)
+
+        # Dynamic CFG scale (logic unchanged)
+        min_sim = 0.90
+        max_sim = 0.99
+        cosine_sim_clamped = max(min(cosine_sim, max_sim), min_sim)
+        scale_factor = 1 + ((cosine_sim_clamped - min_sim) / (max_sim - min_sim))
+        current_cfg = cfg_scale * scale_factor
+        current_cfg = min(current_cfg, cfg_scale * 2.0)
+        cfg_scales_used.append(current_cfg)
+
+        eps_pred = eps_uncond + cfg_scale * (eps_cond - eps_uncond) # [B, N, Dz]
+
+        # Sigma_t calculation (eta part)
+        # Ensure broadcasting for alpha terms if they are not scalar here.
+        # The diff_params values are usually 1D tensors, indexed by t (which is [B]).
+        # So alpha_bar_t and alpha_bar_t_prev from diff_params[...][t] are [B].
+        # We need them to broadcast correctly with eps_pred if used directly.
+        # However, the formula for sigma_t uses scalar alpha_bar_t and alpha_bar_t_prev
+        # derived for the *current timestep i*.
+        # So, it's better to use scalar values from diff_params indexed by `i` for sigma_t calculation.
+        # Or, if using the batched alpha_bar_t_val etc., ensure dimensions match.
+
+        # Let's use the batched alpha values for consistency in sigma_t calculation.
+        # (1 - alpha_bar_t_prev_val) etc. will be [B,1,1]
+        # The clamp is important for numerical stability.
+        term_in_sqrt = (1.0 - alpha_bar_t_prev_val) / (1.0 - alpha_bar_t_val + 1e-12) * \
+                       (1.0 - alpha_bar_t_val / (alpha_bar_t_prev_val + 1e-12))
+        sigma_t = eta * torch.sqrt(torch.clamp(term_in_sqrt, min=1e-12)) # sigma_t will be [B,1,1]
+
+        # Predict x0
+        # (z_t - sqrt(1-alpha_bar_t)*eps) / sqrt(alpha_bar_t)
+        # All terms will broadcast correctly: [B,N,Dz] - [B,1,1]*[B,N,Dz] / [B,1,1]
+        pred_x0 = (z_t - sqrt_one_minus_alpha_bar_t_val * eps_pred) / (sqrt_alpha_bar_t_val + 1e-12) # Add eps for sqrt_alpha_bar if it can be 0
+        if latent_min_max is not None:
+            pred_x0 = torch.clamp(pred_x0, latent_min_max[0], latent_min_max[1])
+
+        # Direction pointing to x_t (DDIM formula)
+        # sqrt(1 - alpha_bar_t_prev - sigma_t^2) * eps_pred
+        # This also needs careful broadcasting and clamping.
+        sqrt_term_for_dir_xt = torch.sqrt(torch.clamp(1.0 - alpha_bar_t_prev_val - sigma_t**2, min=0.0))
+        dir_xt = sqrt_term_for_dir_xt * eps_pred # [B,1,1] * [B,N,Dz] -> [B,N,Dz]
+
+        # x_t_prev = x_0_hat * sqrt(alpha_bar_t_prev) + pred_dir_xt
+        # [B,N,Dz]*[B,1,1] + [B,N,Dz]
+        x_t_prev = torch.sqrt(alpha_bar_t_prev_val) * pred_x0 + dir_xt
+
+        if eta > 0: # Add noise if eta > 0
+            # noise needs to be [B, N, Dz]
+            noise_vec = torch.randn_like(z_t) # Correctly generates [B,N,Dz]
+            x_t_prev += sigma_t * noise_vec # [B,1,1] * [B,N,Dz] -> [B,N,Dz]
+
+        z_t = x_t_prev
+
+    # Plotting (logic unchanged)
+    if return_visuals:
+        print("Inside return visuals")
+        steps = list(range(num_timesteps))[::-1]
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+        ax1.plot(steps, cosine_sims, label='Cosine Similarity', color='blue')
+        ax1.set_ylabel('Cosine Similarity'); ax1.set_xlabel('Timestep'); ax1.set_title('Cosine Similarity Over Time'); ax1.grid(True); ax1.invert_xaxis()
+        ax2.plot(steps, cfg_scales_used, label='CFG Scale', color='green') # Use cfg_scales_used
+        ax2.set_ylabel('CFG Scale'); ax2.set_xlabel('Timestep'); ax2.set_title('CFG Scale Over Time'); ax2.grid(True); ax2.invert_xaxis()
+        plt.tight_layout(); 
+        plt.savefig('tmp.png')
+        plt.show()
+
+    # Return z_t and optionally the tracked stats
+    return z_t, {"cosine_sims": cosine_sims, "cfg_scales": cfg_scales_used} # Use cfg_scales_used
 
 @torch.no_grad()
 def get_clip_embeddings_seqcond_dpm(prompt, uncond_prompt, clip_model, clip_tokenizer, device, batch_size=1):

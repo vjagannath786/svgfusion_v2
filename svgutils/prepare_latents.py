@@ -18,7 +18,7 @@ except ImportError as e:
     sys.exit(1)
     
 PRECOMPUTED_DATA_PATH = '/home/svgfusion_v2/dataset/optimized_progressive_dataset_precomputed_v8.pt' 
-MODEL_PATH = '/home/model_weights/vp_vae_accel_hybrid_glorious-galaxy-31_s5000_best.pt'
+MODEL_PATH = '/home/model_weights/vp_vae_accel_hybrid_light-feather-36_s5000_best.pt'
 OUTPUT_Z_DATASET_PATH = 'zdataset_vpvae.pt'
 
 
@@ -55,7 +55,7 @@ class zDataset(Dataset):
 
 if __name__ == "__main__":
     set_seed(42)
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cuda")
     print(f"Using device: {device}")
     
     print("Defining model configuration for evaluation...")
@@ -79,8 +79,8 @@ if __name__ == "__main__":
         "command_embed_dim": 64,  
         "num_other_continuous_svg_features": 12,
         "pixel_feature_dim": 384, 
-        "encoder_d_model": 256,   
-        "decoder_d_model": 256,   
+        "encoder_d_model": 512,   
+        "decoder_d_model": 512,   
         "encoder_layers": 4,      
         "decoder_layers": 4,      
         "num_heads": 8,           
@@ -205,7 +205,7 @@ if __name__ == "__main__":
                 
                 mu, log_var = model.encoder(svg_batch, pix_batch, svg_mask_batch, svg_mask_batch)
                 z = mu
-                print(f"z shape: {z.squeeze(0).shape}")
+                #print(f"z shape: {z.squeeze(0).shape}")
                 
                 z_data_list.append({
                     'filename': filename_stem,

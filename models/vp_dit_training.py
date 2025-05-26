@@ -103,11 +103,11 @@ if __name__ == "__main__":
         project="vp-dit-training", # New project name
         config={
             # Training Params
-            "learning_rate": 2e-4, # Adjusted as per paper text
-            "total_steps": 1500,  # Increased training steps
+            "learning_rate": 3e-4, # Adjusted as per paper text
+            "total_steps": 3000,  # Increased training steps
             "batch_size": 64,     # Adjusted batch size
-            "warmup_steps": 50, # Adjusted warmup
-            "lr_decay_min": 2e-6,# Adjusted as per paper text
+            "warmup_steps": 90, # Adjusted warmup
+            "lr_decay_min": 1.5e-5,# Adjusted as per paper text
             "weight_decay": 0.1,   # Adjusted as per paper text
             "log_interval": 10,
             "eval_interval": 100, # Evaluate less frequently for longer runs
@@ -124,7 +124,7 @@ if __name__ == "__main__":
             "context_dim": 768,       # CLIP ViT-B/32 last_hidden_state is 768
             "num_blocks": 12,         # Like VP-DiT S
             "num_heads": 6,           # hidden_dim=384 divisible by 6
-            "mlp_ratio": 4.0,         # Using deeper MLP ratio from discussion
+            "mlp_ratio": 8.0,         # Using deeper MLP ratio from discussion
             "dropout": 0.1,
 
             # Diffusion Params

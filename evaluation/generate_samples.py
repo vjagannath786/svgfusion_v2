@@ -48,8 +48,8 @@ except ImportError as e:
 # -----------------------------------------------------------------------------
 
 # --- Paths ---
-PATH_VAE_CHECKPOINT = '/home/model_weights/vp_vae_accel_hybrid_glorious-galaxy-31_s5000_best.pt' # VAE trained with sequential latents
-PATH_VSDIT_CHECKPOINT = "/home/saved_models_vsdit_clip/vsdit_clip_seqcond_misunderstood-galaxy-58_best.pth" # DiT trained with sequential latents
+PATH_VAE_CHECKPOINT = '/home/model_weights/vp_vae_accel_hybrid_light-feather-36_s5000_best.pt' # VAE trained with sequential latents
+PATH_VSDIT_CHECKPOINT = "/home/saved_models_vsdit_clip/vsdit_clip_seqcond_sweet-galaxy-60_best.pth" # DiT trained with sequential latents
 PATH_CLIP_MODEL = "/home/clip_model/clip-vit-large-patch14"
 OUTPUT_DIR = "./generated_svgs_vsdit_seqcond_sequential_latent" # New output dir
 
@@ -112,8 +112,8 @@ vp_vae_config = {
     "command_embed_dim": 64,
     "num_other_continuous_svg_features": 12, # Example
     "pixel_feature_dim": 384, # Example
-    "encoder_d_model": 256, # Example, from your VAE training script
-    "decoder_d_model": 256, # Example
+    "encoder_d_model": 512, # Example, from your VAE training script
+    "decoder_d_model": 512, # Example
     "encoder_layers": 4,
     "decoder_layers": 4,
     "num_heads": 8,
@@ -249,8 +249,8 @@ def generate_svg_from_prompt(
     print(f"Target latent shape for DiT sampling: {latent_shape}")
 
     # 2.A. Sample Latents using DDIM
-    # print(f"Sampling latents using DDIM ({ddim_steps} steps)...")
-    # # sub_diff_params, _ = get_sub_schedule(ddim_diff_params, dpm_total_train_timesteps, ddim_steps) # dpm_total_train_timesteps is just T
+    print(f"Sampling latents using DDIM ({ddim_steps} steps)...")
+    # sub_diff_params, _ = get_sub_schedule(ddim_diff_params, dpm_total_train_timesteps, ddim_steps) # dpm_total_train_timesteps is just T
     sampled_latents_ddim, _ = ddim_sample( # Assuming ddim_sample is updated for sequential latents
         model=vs_dit_model,
         shape=latent_shape,
@@ -263,7 +263,7 @@ def generate_svg_from_prompt(
         eta=ddim_eta,
         clip_tokenizer=clip_tokenizer,
         clip_model=clip_model,
-        return_visuals=False # No plots during generation loop by default
+        return_visuals=True # No plots during generation loop by default
     )
     sampled_latents = sampled_latents_ddim # Choose which sampler's output to use
 
@@ -331,8 +331,8 @@ def generate_svg_from_prompt(
 # Main Execution Block
 # =============================================================================
 if __name__ == "__main__":
-    prompts_to_generate = [ "a red bird with a yellow beak"] # "a smiling emoji face", "an arrow pointing right"
-    n_samples_per_prompt = 1 # For quicker testing
+    prompts_to_generate = [ "a red bird with a yellow beak and two yellow legs"] # "a smiling emoji face", "an arrow pointing right"
+    n_samples_per_prompt = 5 # For quicker testing
 
     svg_tensor_converter_instance = SVGToTensor_Normalized() # For SVG final processing
 

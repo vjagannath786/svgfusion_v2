@@ -427,11 +427,11 @@ def main():
         "warmup_steps": 100, "lr_decay_min": 1.5e-5, "weight_decay": 0.1,
         "log_interval": 10, "eval_interval": 100,
         "latent_dim": 128, "encoder_layers": 4, "decoder_layers": 4,
-        "encoder_d_model": 256, "decoder_d_model": 256,
+        "encoder_d_model": 512, "decoder_d_model": 512,
         "element_embed_dim": 64, "command_embed_dim": 64,
         "num_other_continuous_svg_features": num_other_continuous_features, # For encoder and decoder
         "pixel_feature_dim": dino_embed_dim_from_data, "num_heads": 8, 
-        "kl_weight_max": 1e-6, "kl_anneal_portion": 0.8,
+        "kl_weight_max": 1e-5, "kl_anneal_portion": 0.8,
         "ce_elem_weight": 1.0, "ce_cmd_weight": 1.5, "mse_cont_weight": 10.0, # Adjusted weights
         "dataset_source": DATASET_FILE, "architecture": "VPVAE_Accel_HybridLoss_NoTau",
         "max_seq_len_train": 1024, 
@@ -515,7 +515,7 @@ def main():
         command_padding_idx=config_dict["command_padding_idx"]
     )
 
-    optimizer = optim.AdamW(model.parameters(), lr=config_dict["learning_rate"], weight_decay=config_dict["weight_decay"], betas=(0.9, 0.999))
+    optimizer = optim.AdamW(model.parameters(), lr=config_dict["learning_rate"], weight_decay=config_dict["weight_decay"], betas=(0.9, 0.95))
     steps_after_warmup = config_dict["total_steps"] - config_dict["warmup_steps"]
     #scheduler = CosineAnnealingLR(optimizer, T_max=max(1, steps_after_warmup), eta_min=config_dict["lr_decay_min"])
     scheduler = cosine_warmup_scheduler(
