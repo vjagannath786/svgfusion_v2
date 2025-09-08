@@ -7,6 +7,8 @@ from tqdm import tqdm
 import numpy as np
 import traceback
 import torch.nn.functional as F
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
 
 # Ensure sys.path is set if svgutils or dataset_preparation_dynamic is not in standard locations
 import sys
@@ -14,7 +16,7 @@ import random
 sys.path.append(".") # Add current directory to path
 
 try:
-    from models.vpvae_accelerate_ce import VPVAE # Your trained model class
+    from models import VPVAE # Your trained model class
     from svgutils import SVGToTensor_Normalized, tensor_to_svg_file_hybrid_wrapper # For de-norm params and vocabs
     from svgutils import load_dino_model_components # To infer DINO dims
     print("Successfully imported VPVAE, SVGToTensor_Normalized, and load_dino_model_components.")
@@ -26,12 +28,12 @@ except ImportError as e:
 
 # --- Paths and Config ---
 # Directory where individual precomputed SVG .pt files are saved
-PRECOMPUTED_DATA_OUTPUT_DIR = "precomputed_patch_tokens_data" 
+PRECOMPUTED_DATA_OUTPUT_DIR = "./datasets/precomputed_patch_tokens_data" 
 # Path to the file containing a list of paths to the individual .pt files
-PRECOMPUTED_FILE_LIST_PATH = "precomputed_patch_tokens_file_list.pt"
+PRECOMPUTED_FILE_LIST_PATH = "./datasets/precomputed_patch_tokens_file_list.pt"
 
 # !!! REPLACE WITH YOUR ACTUAL TRAINED HYBRID MODEL PATH !!!
-MODEL_PATH = './best_models/vp_vae_accel_hybrid_zany-armadillo-12_s3000_best.pt' 
+MODEL_PATH = './vp_vae_accel_hybrid_peach-shape-18_s8500_best.pt' 
 
 # Output directory for reconstructed SVGs
 OUTPUT_DIR = 'vae_reconstructions_eval_patch_tokens' 
@@ -44,7 +46,8 @@ def set_seed_eval(seed):
 
 if __name__ == "__main__":
     set_seed_eval(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = "cpu"
     print(f"Using device: {device}")
 
     # --- 1. Dynamically Infer Configuration Parameters ---
@@ -59,6 +62,7 @@ if __name__ == "__main__":
     # Load the list of precomputed file paths
     try:
         precomputed_file_paths = torch.load(PRECOMPUTED_FILE_LIST_PATH, map_location='cpu')
+        precomputed_file_paths = ['./datasets/' + p for p in precomputed_file_paths]
         if not precomputed_file_paths: 
             print("Error: Precomputed file list is empty. Cannot infer SVG dimensions."); sys.exit(1)
     except Exception as e:
@@ -96,7 +100,7 @@ if __name__ == "__main__":
         "encoder_layers": 4,      # Example, use actual from training
         "decoder_layers": 4,      # Example, use actual from training
         "num_heads": 8,           # Example, use actual from training
-        "latent_dim": 32,         # Example, use actual from training
+        "latent_dim": 64,         # Example, use actual from training
         "element_padding_idx": element_pad_idx_cfg,
         "command_padding_idx": command_pad_idx_cfg,
         "fixed_dino_patch_seq_length": fixed_dino_patch_seq_length # Inferred
@@ -177,7 +181,7 @@ if __name__ == "__main__":
     
     # Example filtering for 'unicorn' - Adjust as needed
     filtered_eval_file_paths = [
-        fp for fp in precomputed_file_paths if 'crab' in Path(fp).stem.lower()
+        fp for fp in precomputed_file_paths if 'banana' in Path(fp).stem.lower()
     ]
     if filtered_eval_file_paths:
         eval_file_paths = filtered_eval_file_paths
