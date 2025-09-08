@@ -338,8 +338,8 @@ def main():
     accelerator = Accelerator(log_with="wandb")
 
     # --- CONFIGURATION (Adjust paths as necessary) ---
-    PRECOMPUTED_DATA_OUTPUT_DIR = "precomputed_patch_tokens_data" 
-    PRECOMPUTED_FILE_LIST_PATH = "precomputed_patch_tokens_file_list.pt" 
+    PRECOMPUTED_DATA_OUTPUT_DIR = "./datasets/precomputed_patch_tokens_data/" 
+    PRECOMPUTED_FILE_LIST_PATH = "./datasets/precomputed_patch_tokens_file_list.pt" 
     
     DATASET_FILE_LIST = PRECOMPUTED_FILE_LIST_PATH 
     # --- END CONFIGURATION ---
@@ -365,10 +365,11 @@ def main():
     
     try:
         # Load the first actual precomputed data item to infer the dimensions
-        first_precomputed_item_data = torch.load(precomputed_file_paths[0])
-        num_total_svg_features_from_data = first_precomputed_item_data['full_svg_matrix_content'].shape[1]
+        #first_precomputed_item_data = torch.load(precomputed_file_paths[0])
+        #num_total_svg_features_from_data = first_precomputed_item_data['full_svg_matrix_content'].shape[1]
+        num_total_svg_features_from_data = 14
         # num_other_continuous_features is the number of continuous columns AFTER elem_id and cmd_id
-        num_other_continuous_features = num_total_svg_features_from_data - 2 
+        num_other_continuous_features = 12 
     except Exception as e:
         if accelerator.is_main_process: print(f"Error loading first precomputed item to infer SVG dimensions: {e}"); traceback.print_exc(); sys.exit(1)
 
@@ -388,8 +389,8 @@ def main():
     config_dict = {
         "learning_rate": 3e-4, "total_steps": 15000, "batch_size_per_device": 16,
         "warmup_steps": 300, "lr_decay_min": 1.5e-5, "weight_decay": 0.1,
-        "log_interval": 10, "eval_interval": 100,
-        "latent_dim": 32, "encoder_layers": 4, "decoder_layers": 4,
+        "log_interval": 10, "eval_interval": 500,
+        "latent_dim": 64, "encoder_layers": 4, "decoder_layers": 4,
         "encoder_d_model": 512, "decoder_d_model": 512,
         "element_embed_dim": 64, "command_embed_dim": 64,
         "num_other_continuous_svg_features": num_other_continuous_features, # Use inferred value
