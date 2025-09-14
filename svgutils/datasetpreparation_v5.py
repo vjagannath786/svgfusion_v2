@@ -234,6 +234,7 @@ class DynamicProgressiveSVGDataset(Dataset):
             # This is a small overhead at init, but can be optimized if num_stages is predictable.
             # For now, loading the minimal info needed for index_map.
             # A more robust way might be to save (file_path, num_stages) tuples.
+            file_path = './dataset/' + file_path
             temp_data = torch.load(file_path)
             num_stages_for_this_item = len(temp_data['element_row_counts_for_stages'])
             for stage_k in range(num_stages_for_this_item):
@@ -254,6 +255,7 @@ class DynamicProgressiveSVGDataset(Dataset):
         # --- MODIFIED PART START: Load data on demand ---
         file_path = self.precomputed_file_paths[original_item_idx]
         #print(file_path)
+        file_path = './dataset/' + file_path
         original_item_data = torch.load(file_path) # Load only the needed SVG's data
         # --- MODIFIED PART END ---
 
