@@ -161,7 +161,7 @@ if __name__ == "__main__":
         # Training Params
         "learning_rate": 2e-4,
         "total_steps": 10000,
-        "batch_size": 16,
+        "batch_size": 8,
         "warmup_steps": 200,
         "lr_decay_min": 2e-6,
         "weight_decay": 0.1,
@@ -191,13 +191,13 @@ if __name__ == "__main__":
 
         # Data/Paths
         "z_dataset_path": "./zdataset_vpvae_patch_tokens.pt", # Path to the prepared zDataset object
-        "clip_model_path": "/Users/varun_jagannath/Documents/D/test python/clip-vit-large-patch14", # HuggingFace CLIP model name
+        "clip_model_path": "./clip-vit-large-patch14", # HuggingFace CLIP model name
         "output_model_dir": "saved_models_vsdit_clip_second_patch" # New directory
     }
 
     # --- Setup Device ---
     if torch.cuda.is_available(): device = torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): device = torch.device("mps")
+    #elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): device = torch.device("mps")
     else: device = torch.device("cpu")
     print(f"Using device: {device}")
 
@@ -476,31 +476,31 @@ if __name__ == "__main__":
                             except Exception as e:
                                 print(f"Warning: Failed to log best model artifact: {e}")
 
-                    # --- Run DDIM Sampling (Optional during eval) ---
-                    print("Running DDIM sampling (example)...")
-                    num_samples_to_generate = min(4, config.batch_size)
-                    sample_prompts = [
-                        "a cute smiling cat",
-                        "a red umbrella",
-                        "a futuristic robot",
-                        "a simple green tree"
-                    ][:num_samples_to_generate] # Ensure enough prompts for batch size
+                    # # --- Run DDIM Sampling (Optional during eval) ---
+                    # print("Running DDIM sampling (example)...")
+                    # num_samples_to_generate = min(4, config.batch_size)
+                    # sample_prompts = [
+                    #     "a cute smiling cat",
+                    #     "a red umbrella",
+                    #     "a futuristic robot",
+                    #     "a simple green tree"
+                    # ][:num_samples_to_generate] # Ensure enough prompts for batch size
 
-                    sample_text_inputs = clip_tokenizer(sample_prompts, padding=True, truncation=True, return_tensors="pt").to(target_device)
-                    sample_context_seq = clip_model(**sample_text_inputs).last_hidden_state
-                    sample_mask = ~(sample_text_inputs.attention_mask.bool())
+                    # sample_text_inputs = clip_tokenizer(sample_prompts, padding=True, truncation=True, return_tensors="pt").to(target_device)
+                    # sample_context_seq = clip_model(**sample_text_inputs).last_hidden_state
+                    # sample_mask = ~(sample_text_inputs.attention_mask.bool())
                     
-                    generated_z0, _ = ddim_sample(
-                        model=model, shape=(num_samples_to_generate, config.num_svg_tokens, config.latent_dim),
-                        context_seq=sample_context_seq, context_padding_mask=sample_mask,
-                        diff_params=diff_params, num_timesteps=config.noise_steps,
-                        target_device=target_device, cfg_scale=config.cfg_scale_eval,
-                        eta=config.ddim_eta, clip_model=clip_model, clip_tokenizer=clip_tokenizer,
-                        return_visuals=False # Set to True to see sampling plots (will pause)
-                    )
-                    print(f"Generated z0 shape: {generated_z0.shape}")
-                    print(f"Generated z0 mean: {generated_z0.mean().item():.4f}, std: {generated_z0.std().item():.4f}")
-                    print("--- Evaluation complete ---")
+                    # generated_z0, _ = ddim_sample(
+                    #     model=model, shape=(num_samples_to_generate, config.num_svg_tokens, config.latent_dim),
+                    #     context_seq=sample_context_seq, context_padding_mask=sample_mask,
+                    #     diff_params=diff_params, num_timesteps=config.noise_steps,
+                    #     target_device=target_device, cfg_scale=config.cfg_scale_eval,
+                    #     eta=config.ddim_eta, clip_model=clip_model, clip_tokenizer=clip_tokenizer,
+                    #     return_visuals=False # Set to True to see sampling plots (will pause)
+                    # )
+                    # print(f"Generated z0 shape: {generated_z0.shape}")
+                    # print(f"Generated z0 mean: {generated_z0.mean().item():.4f}, std: {generated_z0.std().item():.4f}")
+                    # print("--- Evaluation complete ---")
 
             model.train() # Ensure model is back in train mode
             global_step += 1
