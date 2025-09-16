@@ -197,7 +197,7 @@ class VS_DiT(nn.Module):
         )
         self.final_proj = nn.Linear(hidden_dim, latent_dim, bias=True) # Maps back to latent_dim (for epsilon)
 
-        self.initialize_weights()
+        #self.initialize_weights()
 
     def initialize_weights(self):
         # Basic initialization for all linear layers
