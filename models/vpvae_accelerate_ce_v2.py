@@ -390,7 +390,7 @@ def main():
         "learning_rate": 3e-4, "total_steps": 15000, "batch_size_per_device": 16,
         "warmup_steps": 300, "lr_decay_min": 1.5e-5, "weight_decay": 0.1,
         "log_interval": 10, "eval_interval": 500,
-        "latent_dim": 64, "encoder_layers": 4, "decoder_layers": 4,
+        "latent_dim": 32, "encoder_layers": 4, "decoder_layers": 4,
         "encoder_d_model": 512, "decoder_d_model": 512,
         "element_embed_dim": 64, "command_embed_dim": 64,
         "num_other_continuous_svg_features": num_other_continuous_features, # Use inferred value
