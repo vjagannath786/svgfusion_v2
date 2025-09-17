@@ -165,8 +165,8 @@ if __name__ == "__main__":
         "warmup_steps": 200,
         "lr_decay_min": 2e-6,
         "weight_decay": 0.1,
-        "log_interval": 10,
-        "eval_interval": 100,
+        "log_interval": 50,
+        "eval_interval": 500,
         "val_split": 0.05,
         "seed": 42,
         "cfg_dropout_prob": 0.1, # Probability to drop out conditional context during training
@@ -205,7 +205,7 @@ if __name__ == "__main__":
     print(f"Loading zDataset from '{initial_config['z_dataset_path']}'...")
     try:
         # Loaded data is expected to be the zDataset object itself
-        full_zdataset = torch.load(initial_config['z_dataset_path'])
+        full_zdataset = torch.load(initial_config['z_dataset_path'],  weights_only=False)
         if not isinstance(full_zdataset, zDataset):
             raise ValueError("Loaded data is not an instance of zDataset. Ensure prepare_latents.py saves the zDataset object directly.")
         print(f"Initialized zDataset with {len(full_zdataset)} items.")
