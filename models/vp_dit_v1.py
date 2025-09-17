@@ -374,7 +374,7 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
         current_cfg = min(current_cfg, cfg_scale * 2.0) # Cap the dynamic scale
         cfg_scales_used.append(current_cfg)
 
-        eps_pred = uncond_context_seq + current_cfg * (eps_cond - eps_uncond) # Use current_cfg for scaling
+        eps_pred = eps_uncond + current_cfg * (eps_cond - eps_uncond) # Use current_cfg for scaling
 
         # Sigma_t calculation
         term_in_sqrt = (1.0 - alpha_bar_t_prev_val) / (1.0 - alpha_bar_t_val + 1e-12) * \
