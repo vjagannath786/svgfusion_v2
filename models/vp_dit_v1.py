@@ -10,6 +10,7 @@ import os # Needed for saving models
 import random
 import sys # For sys.path.append
 from transformers import AutoTokenizer, AutoModel # For CLIP in ddim_sample
+import matplotlib.pyplot as plt
 
 # --- Device Setup ---
 if torch.cuda.is_available():
@@ -21,6 +22,16 @@ else:
 print(f"Using device: {device}")
 
 # --- Helper Modules ---
+
+
+# --- Helper Functions ---
+def modulate(x, shift, scale):
+    """Apply AdaLN modulation with improved numerical stability."""
+    return x * (1 + scale) + shift
+
+def t2i_modulate(x, shift, scale):
+    """Text-to-image style modulation."""
+    return x * (1 + scale) + shift
 
 def apply_rope(x):
     """
@@ -75,22 +86,31 @@ class MLP(nn.Module):
         hidden_features = hidden_features or in_features
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.act1 = act_layer()
-        self.fc2 = nn.Linear(hidden_features, hidden_features)
+        self.fc2 = nn.Linear(hidden_features, out_features)
         self.act2 = act_layer()
-        self.fc3 = nn.Linear(hidden_features, out_features)
+        #self.fc3 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
         x = self.fc1(x); x = self.act1(x); x = self.drop(x)
         x = self.fc2(x); x = self.act2(x); x = self.drop(x)
-        x = self.fc3(x); x = self.drop(x)
+        #x = self.fc3(x); x = self.drop(x)
         return x
 
 class MultiHeadAttention(nn.Module): 
     def __init__(self, d_model, num_heads, kdim=None, vdim=None, batch_first=True):
-        super().__init__(); self.num_heads=num_heads; self.d_model=d_model; assert d_model % num_heads == 0; self.batch_first=batch_first
-        self.kdim = kdim if kdim is not None else d_model; self.vdim = vdim if vdim is not None else d_model; self.d_k = d_model // num_heads
-        self.w_q = nn.Linear(d_model, d_model); self.w_k = nn.Linear(self.kdim, d_model); self.w_v = nn.Linear(self.vdim, d_model); self.w_o = nn.Linear(d_model, d_model)
+        super().__init__(); 
+        self.num_heads=num_heads; 
+        self.d_model=d_model; 
+        assert d_model % num_heads == 0; 
+        self.batch_first=batch_first
+        self.kdim = kdim if kdim is not None else d_model; 
+        self.vdim = vdim if vdim is not None else d_model; 
+        self.d_k = d_model // num_heads
+        self.w_q = nn.Linear(d_model, d_model); 
+        self.w_k = nn.Linear(self.kdim, d_model); 
+        self.w_v = nn.Linear(self.vdim, d_model); 
+        self.w_o = nn.Linear(d_model, d_model)
     def forward(self, query, key, value, key_padding_mask=None, attn_mask=None):
         batch_size=query.size(0); q=self.w_q(query); k=self.w_k(key); v=self.w_v(value); q=q.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2); k=k.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2); v=v.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         scores=torch.matmul(q, k.transpose(-2, -1))/math.sqrt(self.d_k);
@@ -100,9 +120,156 @@ class MultiHeadAttention(nn.Module):
              scores=scores.masked_fill(attn_mask, float('-inf'))
         attn=F.softmax(scores, dim=-1); context=torch.matmul(attn, v); context=context.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model); output=self.w_o(context); return output
 
+class SelfAttention(nn.Module):
+    """Optimized self-attention with better numerical stability."""
+    
+    def __init__(self, dim, num_heads=8, qkv_bias=True, attn_drop=0., proj_drop=0., fp32_attention=False):
+        super().__init__()
+        assert dim % num_heads == 0, f"dim {dim} should be divisible by num_heads {num_heads}"
+        
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.fp32_attention = fp32_attention
+        
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x, attn_mask=None):
+        B, N, C = x.shape
+        
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)  # [B, num_heads, N, head_dim]
+        
+        # Use FP32 for attention computation if specified
+        if self.fp32_attention:
+            q, k = q.float(), k.float()
+        
+        # Handle autocast based on device
+        device_type = x.device.type
+        if device_type == 'mps':
+            # MPS autocast support is limited/newer. 
+            # If fp32_attention is True, we are already in FP32, so we can disable autocast context.
+            context = torch.no_grad() # Dummy context
+        else:
+            context = torch.amp.autocast(device_type=device_type, enabled=not self.fp32_attention)
+
+        with context:
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            
+            if attn_mask is not None:
+                if attn_mask.dim() == 2:
+                    attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)
+                attn = attn.masked_fill(attn_mask, float('-inf'))
+            
+            attn = F.softmax(attn, dim=-1)
+        
+        attn = self.attn_drop(attn)
+        
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        
+        return x
+
+class CrossAttention(nn.Module):
+    """Efficient cross-attention for text conditioning."""
+    
+    def __init__(self, dim, num_heads=8, qkv_bias=True, attn_drop=0., proj_drop=0., fp32_attention=False):
+        super().__init__()
+        assert dim % num_heads == 0, f"dim {dim} should be divisible by num_heads {num_heads}"
+        
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.fp32_attention = fp32_attention
+        
+        self.q_linear = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv_linear = nn.Linear(dim, dim * 2, bias=qkv_bias)  # Combined k,v for efficiency
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x, context, context_mask=None):
+        """
+        x: [B, N, dim] - query (latent sequence)
+        context: [B, S, dim] - key/value (text sequence)
+        context_mask: [B, S] - padding mask for context (True = padding)
+        """
+        B, N, C = x.shape
+        S = context.shape[1]
+        
+        # Query from latent sequence
+        q = self.q_linear(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Key and Value from context sequence
+        kv = self.kv_linear(context).reshape(B, S, 2, self.num_heads, self.head_dim)
+        k, v = kv.unbind(2)
+        k = k.transpose(1, 2)  # [B, num_heads, S, head_dim]
+        v = v.transpose(1, 2)  # [B, num_heads, S, head_dim]
+        
+        # Use FP32 for attention computation if specified
+        if self.fp32_attention:
+            q, k = q.float(), k.float()
+        
+        # Handle autocast based on device
+        device_type = x.device.type
+        if device_type == 'mps':
+            # MPS autocast support is limited/newer. 
+            # If fp32_attention is True, we are already in FP32, so we can disable autocast context.
+            # If fp32_attention is False, we let it run in default precision (likely FP32 on MPS unless explicitly cast)
+            context = torch.no_grad() # Dummy context
+        else:
+            context = torch.amp.autocast(device_type=device_type, enabled=not self.fp32_attention)
+
+        with context:
+            attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, num_heads, N, S]
+            
+            if context_mask is not None:
+                # Expand mask: [B, S] -> [B, num_heads, N, S]
+                mask = context_mask.unsqueeze(1).unsqueeze(1).expand(B, self.num_heads, N, S)
+                attn = attn.masked_fill(mask, float('-inf'))
+            
+            attn = F.softmax(attn, dim=-1)
+        
+        attn = self.attn_drop(attn)
+        
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        
+        return x
+    
+class FeedForward(nn.Module):
+    """Improved feedforward network with GELU activation."""
+    
+    def __init__(self, dim, hidden_dim=None, out_dim=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_dim = out_dim or dim
+        hidden_dim = hidden_dim or dim * 4
+        
+        self.fc1 = nn.Linear(dim, hidden_dim)
+        self.act = act_layer()
+        self.drop1 = nn.Dropout(drop)
+        self.fc2 = nn.Linear(hidden_dim, out_dim)
+        self.drop2 = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
+        return x
+
+
 # --- VS-DiT Block (Modified for Sequence Context) ---
 
-class VS_DiT_Block(nn.Module):
+class VS_DiT_Block_vo(nn.Module):
     """ A VS-DiT block operating with internal hidden_dim, accepting sequence context. """
     def __init__(self, hidden_dim, num_heads, mlp_ratio=4.0, dropout=0.0): # context_dim removed here
         super().__init__()
@@ -138,12 +305,15 @@ class VS_DiT_Block(nn.Module):
 
         # --- Self-Attention on latent (x) ---
         normed_x_sa = self.norm1(x) # x: [B, N, hidden_dim]
+        #normed_x_sa = x
+        
         mod_x_sa = normed_x_sa * (1 + gamma_1) + beta_1 # Apply AdaLN modulation
         sa_out = self.self_attn(mod_x_sa, mod_x_sa, mod_x_sa) # Query, Key, Value are all from x
         x = x + alpha_1 * sa_out # Residual update
 
         # --- Cross-Attention (Query: latent, Key/Value: projected_context_seq) ---
         normed_x_ca = self.norm2(x) # x: [B, N, hidden_dim]
+        #3normed_x_ca = x
         # Modulation for cross-attention's query (often done after norm)
         # mod_x_ca = normed_x_ca * (1 + gamma_2) + beta_2 # Applying mod here or after CA depends on DiT variant
         ca_out = self.cross_attn(
@@ -156,11 +326,252 @@ class VS_DiT_Block(nn.Module):
 
         # --- FeedForward on latent (x) ---
         normed_x_ff = self.norm3(x) # x: [B, N, hidden_dim]
+        #normed_x_ff = x
         mod_x_ff = normed_x_ff * (1 + gamma_2) + beta_2 # Apply AdaLN modulation
         ff_out = self.mlp(mod_x_ff)
         x = x + alpha_2 * ff_out # Residual update
 
         return x # Output: [B, N, hidden_dim]
+
+class VS_DiT_Block(nn.Module):
+    """Improved VS-DiT block with better numerical stability and modulation."""
+    
+    def __init__(self, hidden_dim, num_heads, mlp_ratio=4.0, dropout=0.0, fp32_attention=False):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.fp32_attention = fp32_attention
+        
+        # Layer norms (without learnable parameters for AdaLN)
+        self.norm1 = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+        self.norm2 = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+        self.norm3 = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+        
+        # AdaLN modulation MLPs
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 6 * hidden_dim, bias=True)
+        )
+        
+        # Attention layers
+        self.self_attn = SelfAttention(
+            hidden_dim, num_heads=num_heads, 
+            attn_drop=dropout, proj_drop=dropout,
+            fp32_attention=fp32_attention
+        )
+        
+        self.cross_attn = CrossAttention(
+            hidden_dim, num_heads=num_heads,
+            attn_drop=dropout, proj_drop=dropout,
+            fp32_attention=fp32_attention
+        )
+        
+        # Feedforward network
+        mlp_hidden_dim = int(hidden_dim * mlp_ratio)
+        self.mlp = FeedForward(
+            hidden_dim, hidden_dim=mlp_hidden_dim,
+            act_layer=lambda: nn.GELU(approximate="tanh"),
+            drop=dropout
+        )
+
+    def forward(self, x, t_emb, context, context_mask=None, latent_mask=None):
+        """
+        x: [B, N, hidden_dim] - latent sequence
+        t_emb: [B, hidden_dim] - timestep embedding
+        context: [B, S, hidden_dim] - text context (already projected)
+        context_mask: [B, S] - padding mask for context (True = padding)
+        latent_mask: [B, N] - padding mask for latents (True = padding)
+        """
+        B, N, D = x.shape
+        
+        # Get modulation parameters
+        shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff = self.adaLN_modulation(t_emb).chunk(6, dim=1)
+        
+        # Reshape for broadcasting: [B, D] -> [B, 1, D]
+        shift_sa = shift_sa.unsqueeze(1)
+        scale_sa = scale_sa.unsqueeze(1)
+        gate_sa = gate_sa.unsqueeze(1)
+        shift_ff = shift_ff.unsqueeze(1)
+        scale_ff = scale_ff.unsqueeze(1)
+        gate_ff = gate_ff.unsqueeze(1)
+        
+        # Self-attention branch
+        x_norm1 = self.norm1(x)
+        x_modulated1 = modulate(x_norm1, shift_sa, scale_sa)
+        x_sa = self.self_attn(x_modulated1, attn_mask=latent_mask) # Pass latent_mask to self_attn
+        x = x + gate_sa * x_sa
+        
+        # Cross-attention branch
+        x_norm2 = self.norm2(x)
+        #
+        x_ca = self.cross_attn(x_norm2, context, context_mask)
+        x = x +  x_ca
+        
+        # Feedforward branch
+        x_norm3 = self.norm3(x)
+        x_modulated3 = modulate(x_norm3, shift_ff, scale_ff)
+        x_ff = self.mlp(x_modulated3)
+        x = x + gate_ff * x_ff
+        
+        return x
+
+# --- VS-DiT Model ---
+
+class VS_DiT(nn.Module):
+    """Improved VS-DiT model with better initialization and stability."""
+    
+    def __init__(self, latent_dim, hidden_dim, context_dim, num_blocks, num_heads, 
+                 mlp_ratio=4.0, dropout=0.1, fp32_attention=False):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.num_blocks = num_blocks
+        self.fp32_attention = fp32_attention
+        
+        # Timestep embedding
+        self.t_embedder = TimestepEmbedder(hidden_size=hidden_dim)
+        
+        # Input projection
+        self.proj_in = nn.Linear(latent_dim, hidden_dim, bias=True)
+        
+        # Context projection
+        self.context_proj = nn.Linear(context_dim, hidden_dim, bias=True)
+        
+        # DiT blocks
+        self.blocks = nn.ModuleList([
+            VS_DiT_Block(
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                dropout=dropout,
+                fp32_attention=fp32_attention
+            ) for _ in range(num_blocks)
+        ])
+        
+        # Final layers
+        self.final_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
+        self.final_adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 2 * hidden_dim, bias=True)
+        )
+        self.final_proj = nn.Linear(hidden_dim, latent_dim, bias=True)
+        
+        # Initialize weights
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        """Proper weight initialization for stable training."""
+        # Initialize all linear layers with Xavier uniform
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        
+        self.apply(_basic_init)
+        
+        # Special initialization for specific layers
+        
+        # Timestep embedder
+        if hasattr(self.t_embedder, 'mlp'):
+            for layer in self.t_embedder.mlp:
+                if isinstance(layer, nn.Linear):
+                    nn.init.normal_(layer.weight, std=0.02)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+        
+        # Zero-out the output of adaLN modulation MLPs
+        for block in self.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+        
+        # Zero-out final modulation and output projection
+        nn.init.constant_(self.final_adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_proj.weight, 0)
+        nn.init.constant_(self.final_proj.bias, 0)
+
+    def forward(self, z_t, t, context_seq, context_padding_mask=None, latent_mask=None):
+        """
+        z_t: [B, N, latent_dim] - noisy latent sequence
+        t: [B] - timestep
+        context_seq: [B, S, context_dim] - text embedding sequence
+        context_padding_mask: [B, S] - padding mask for context
+        """
+        device = next(self.parameters()).device
+        B, N, _ = z_t.shape
+        
+        # Move inputs to device
+        z_t = z_t.to(device)
+        t = t.to(device)
+        context_seq = context_seq.to(device)
+        if context_padding_mask is not None:
+            context_padding_mask = context_padding_mask.to(device)
+        
+        # Add positional embeddings
+        pos_embed = get_sinusoidal_pos_embed(N, self.latent_dim, device)
+        z_t = z_t + pos_embed.unsqueeze(0)
+        
+        # Get timestep embedding
+        t_emb = self.t_embedder(t)  # [B, hidden_dim]
+        
+        # Project inputs to hidden dimension
+        h = self.proj_in(z_t)  # [B, N, hidden_dim]
+        context = self.context_proj(context_seq)  # [B, S, hidden_dim]
+        
+        # Apply DiT blocks
+        for block in self.blocks:
+            h = block(h, t_emb, context, context_padding_mask,latent_mask)
+        
+        # Final processing
+        shift, scale = self.final_adaLN_modulation(t_emb).chunk(2, dim=1)
+        shift = shift.unsqueeze(1)  # [B, 1, hidden_dim]
+        scale = scale.unsqueeze(1)  # [B, 1, hidden_dim]
+        
+        h = self.final_norm(h)
+        h = modulate(h, shift, scale)
+        epsilon_pred = self.final_proj(h)  # [B, N, latent_dim]
+        
+        return epsilon_pred
+    
+    def forward_with_cfg(self, z_t, t, context_seq, context_padding_mask, cfg_scale, 
+                        clip_model, clip_tokenizer):
+        """
+        Optimized forward pass with batched classifier-free guidance.
+        """
+        batch_size = z_t.shape[0]
+        device = z_t.device
+        
+        # Create unconditional context
+        text_seq_len = context_seq.size(1)
+        empty_text_inputs = clip_tokenizer(
+            [""] * batch_size,
+            padding='max_length',
+            max_length=text_seq_len,
+            truncation=True,
+            return_tensors="pt"
+        ).to(device)
+        
+        with torch.no_grad():
+            empty_outputs = clip_model(**empty_text_inputs)
+            uncond_context = empty_outputs.last_hidden_state
+            uncond_mask = ~(empty_text_inputs.attention_mask.bool())
+        
+        # Batch conditional and unconditional
+        z_t_combined = torch.cat([z_t, z_t], dim=0)
+        t_combined = torch.cat([t, t], dim=0)
+        context_combined = torch.cat([context_seq, uncond_context], dim=0)
+        mask_combined = torch.cat([context_padding_mask, uncond_mask], dim=0)
+        
+        # Single forward pass
+        eps_combined = self.forward(z_t_combined, t_combined, context_combined, mask_combined)
+        
+        # Split and apply guidance
+        eps_cond, eps_uncond = eps_combined.chunk(2, dim=0)
+        eps_pred = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
+        
+        return eps_pred, eps_cond, eps_uncond
+
 
 # --- VS-DiT Model (Modified for Sequence Context) ---
 
@@ -172,7 +583,7 @@ def get_sinusoidal_pos_embed(seq_len, dim, device):
     pe[:, 1::2] = torch.cos(position * div_term)
     return pe  # [seq_len, dim]
 
-class VS_DiT(nn.Module):
+class VS_DiT_vo(nn.Module):
     """ VS-DiT model accepting sequence context. """
     def __init__(self, latent_dim, hidden_dim, context_dim, num_blocks, num_heads, mlp_ratio=8.0, dropout=0.1):
         super().__init__()
@@ -237,11 +648,12 @@ class VS_DiT(nn.Module):
         nn.init.constant_(self.final_proj.bias, 0)
     
     # MODIFIED forward signature: z_t is now [B, N, latent_dim]
-    def forward(self, z_t, t, context_seq, context_padding_mask=None):
+    def forward(self, z_t, t, context_seq, context_padding_mask=None, latent_mask=None):
         # z_t: [B, N, latent_dim] (noisy latent representation)
         # t: [B] (timestep)
         # context_seq: [B, S_text, context_dim] (text embedding sequence)
         # context_padding_mask: [B, S_text] (True where padded in text context)
+        # latent_mask: [B, N] (True where padded in latent sequence)
 
         model_device = next(self.parameters()).device
         
@@ -251,12 +663,14 @@ class VS_DiT(nn.Module):
         z_t = z_t.to(model_device) + pos_embed.unsqueeze(0) # Add batch dim to pos_embed: [1, N, latent_dim]
 
         # --- Apply RoPE for sequential dependencies after adding fixed positional embeddings ---
-        z_t = apply_rope(z_t) # z_t is [B, N, latent_dim]
+        #z_t = apply_rope(z_t) # z_t is [B, N, latent_dim]
 
         t = t.to(model_device)
         context_seq = context_seq.to(model_device)
         if context_padding_mask is not None:
             context_padding_mask = context_padding_mask.to(model_device)
+        if latent_mask is not None:
+            latent_mask = latent_mask.to(model_device)
 
         t_emb = self.t_embedder(t) # Output: [B, hidden_dim]
         
@@ -267,7 +681,7 @@ class VS_DiT(nn.Module):
 
         # Pass h (latent sequence), t_emb, and projected_context_seq (text sequence) to blocks
         for block in self.blocks:
-            h = block(h, t_emb, projected_context_seq, context_padding_mask) # h remains [B, N, hidden_dim]
+            h = block(h, t_emb, projected_context_seq, context_padding_mask, latent_mask) # h remains [B, N, hidden_dim]
 
         # Final modulation and projection
         final_gamma, final_beta = self.final_modulation_mlp(t_emb).chunk(2, dim=-1)
@@ -278,6 +692,9 @@ class VS_DiT(nn.Module):
         epsilon_pred = self.final_proj(mod_h) # Output: [B, N, latent_dim] - predicted noise in latent space
         
         return epsilon_pred
+
+
+
 
 # --- Diffusion Utilities ---
 
@@ -366,15 +783,15 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
         cosine_sims.append(cosine_sim)
 
         # Dynamic CFG scale (logic unchanged, but now uses config['cfg_scale'])
-        min_sim = 0.90
-        max_sim = 0.99
-        cosine_sim_clamped = max(min(cosine_sim, max_sim), min_sim)
-        scale_factor = 1 + ((cosine_sim_clamped - min_sim) / (max_sim - min_sim))
-        current_cfg = cfg_scale * scale_factor
-        current_cfg = min(current_cfg, cfg_scale * 2.0) # Cap the dynamic scale
-        cfg_scales_used.append(current_cfg)
+        # min_sim = 0.90
+        # max_sim = 0.99
+        # cosine_sim_clamped = max(min(cosine_sim, max_sim), min_sim)
+        # scale_factor = 1 + ((cosine_sim_clamped - min_sim) / (max_sim - min_sim))
+        # current_cfg = cfg_scale * scale_factor
+        # current_cfg = min(current_cfg, cfg_scale * 2.0) # Cap the dynamic scale
+        # cfg_scales_used.append(current_cfg)
 
-        eps_pred = eps_uncond + current_cfg * (eps_cond - eps_uncond) # Use current_cfg for scaling
+        eps_pred = eps_uncond + cfg_scale * (eps_cond - eps_uncond) # Use current_cfg for scaling
 
         # Sigma_t calculation
         term_in_sqrt = (1.0 - alpha_bar_t_prev_val) / (1.0 - alpha_bar_t_val + 1e-12) * \
@@ -411,6 +828,165 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
         plt.show()
 
     return z_t, {"cosine_sims": cosine_sims, "cfg_scales": cfg_scales_used}
+
+
+@torch.no_grad()
+def ddim_sample_fixed(model, shape, context_seq, context_padding_mask,
+                     diff_params, num_timesteps, target_device, cfg_scale=3.0, eta=0.0,
+                     clip_model=None, clip_tokenizer=None, return_visuals=False,
+                     latent_min_max=(-10, 10), ddim_steps=100, latent_mask=None): # Added latent_mask
+    """
+    Fixed DDIM sampling with proper mathematics and batched CFG.
+    """
+    model.eval()
+    batch_size = shape[0]
+    
+    # Initialize with noise
+    x_t = torch.randn(shape, device=target_device)
+    
+    # Move context to device
+    context_seq = context_seq.to(target_device)
+    if context_padding_mask is not None:
+        context_padding_mask = context_padding_mask.to(target_device)
+    if latent_mask is not None:
+        latent_mask = latent_mask.to(target_device)
+
+    if clip_model is None or clip_tokenizer is None:
+        raise ValueError("clip_model and clip_tokenizer must be provided for ddim_sample.")
+
+    # Create timestep schedule for DDIM (subset of training steps)
+    if ddim_steps < num_timesteps:
+        # Use a subset of timesteps for faster sampling
+        timesteps = torch.linspace(num_timesteps - 1, 0, ddim_steps).long()
+    else:
+        timesteps = torch.arange(num_timesteps - 1, -1, -1)
+    
+    # Pre-compute unconditional context
+    text_seq_len = context_seq.size(1)
+    empty_text_inputs = clip_tokenizer(
+        [""] * batch_size,
+        padding='max_length',
+        max_length=text_seq_len,
+        truncation=True,
+        return_tensors="pt"
+    ).to(target_device)
+
+    with torch.no_grad():
+        empty_outputs = clip_model(**empty_text_inputs)
+        uncond_context_seq = empty_outputs.last_hidden_state
+        uncond_padding_mask = ~(empty_text_inputs.attention_mask.bool())
+
+    # Track diagnostics
+    cosine_sims = []
+    pred_x0_norms = []
+
+    for i, t in enumerate(tqdm(timesteps, desc="DDIM Sampling")):
+        t_batch = t.repeat(batch_size).to(target_device)
+        
+        # Get diffusion parameters for current timestep
+        alpha_t = diff_params["alphas_cumprod"][t].item()
+        
+        # Get next timestep parameters
+        if i < len(timesteps) - 1:
+            t_next = timesteps[i + 1]
+            alpha_t_next = diff_params["alphas_cumprod"][t_next].item()
+        else:
+            alpha_t_next = 1.0  # At t=0, alpha_cumprod = 1
+        
+        sqrt_alpha_t = math.sqrt(alpha_t)
+        sqrt_one_minus_alpha_t = math.sqrt(1 - alpha_t)
+        sqrt_alpha_t_next = math.sqrt(alpha_t_next)
+        sqrt_one_minus_alpha_t_next = math.sqrt(1 - alpha_t_next)
+
+        # Classifier-Free Guidance with batched inference
+        if cfg_scale > 1.0:
+            # Batch conditional and unconditional
+            x_t_combined = torch.cat([x_t, x_t], dim=0)
+            t_combined = torch.cat([t_batch, t_batch], dim=0)
+            context_combined = torch.cat([context_seq, uncond_context_seq], dim=0)
+            mask_combined = torch.cat([context_padding_mask, uncond_padding_mask], dim=0)
+            
+            # Handle latent mask for batching
+            latent_mask_combined = None
+            if latent_mask is not None:
+                latent_mask_combined = torch.cat([latent_mask, latent_mask], dim=0)
+
+            # Single forward pass
+            eps_combined = model(x_t_combined, t_combined, context_combined, mask_combined, latent_mask=latent_mask_combined)
+            
+            # Split results
+            eps_cond, eps_uncond = eps_combined.chunk(2, dim=0)
+            
+            # Apply guidance
+            eps_pred = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
+            
+            # Compute cosine similarity for diagnostics
+            cosine_sim = F.cosine_similarity(
+                eps_cond.reshape(batch_size, -1),
+                eps_uncond.reshape(batch_size, -1),
+                dim=1
+            ).mean().item()
+            cosine_sims.append(cosine_sim)
+        else:
+            # No guidance
+            eps_pred = model(x_t, t_batch, context_seq, context_padding_mask, latent_mask=latent_mask)
+            cosine_sims.append(0.0)
+
+        # Predict x_0 using the reparameterization
+        pred_x0 = (x_t - sqrt_one_minus_alpha_t * eps_pred) / sqrt_alpha_t
+        
+        # Clamp predicted x_0 if specified
+        if latent_min_max is not None:
+            pred_x0 = torch.clamp(pred_x0, latent_min_max[0], latent_min_max[1])
+        
+        pred_x0_norms.append(pred_x0.norm().item())
+
+        # Compute sigma for DDIM
+        if eta > 0 and i < len(timesteps) - 1:
+            sigma = eta * math.sqrt((1 - alpha_t_next) / (1 - alpha_t)) * math.sqrt(1 - alpha_t / alpha_t_next)
+        else:
+            sigma = 0.0
+
+        # Compute direction pointing towards x_t
+        if i < len(timesteps) - 1:
+            direction = math.sqrt(1 - alpha_t_next - sigma**2) * eps_pred
+        else:
+            direction = torch.zeros_like(eps_pred)
+
+        # Compute x_{t-1}
+        x_t = sqrt_alpha_t_next * pred_x0 + direction
+        
+        # Add noise if eta > 0
+        if sigma > 0:
+            noise = torch.randn_like(x_t)
+            x_t = x_t + sigma * noise
+
+    # Plotting diagnostics
+    if return_visuals and cosine_sims:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+        
+        steps = range(len(cosine_sims))
+        ax1.plot(steps, cosine_sims, 'b-', linewidth=2)
+        ax1.set_ylabel('Cosine Similarity')
+        ax1.set_xlabel('DDIM Step')
+        ax1.set_title('Conditional vs Unconditional Cosine Similarity')
+        ax1.grid(True, alpha=0.3)
+        
+        ax2.plot(steps, pred_x0_norms, 'r-', linewidth=2)
+        ax2.set_ylabel('Predicted x_0 Norm')
+        ax2.set_xlabel('DDIM Step')
+        ax2.set_title('Predicted x_0 Magnitude Over Time')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig('ddim_sampling_diagnostics.png', dpi=150, bbox_inches='tight')
+        plt.show()
+
+    return x_t, {
+        "cosine_sims": cosine_sims,
+        "pred_x0_norms": pred_x0_norms,
+        "final_norm": x_t.norm().item()
+    }
 
 
 # --- Training (Modified for Sequence Context Simulation/Eval) ---
@@ -550,52 +1126,3 @@ def train(model, train_steps, batch_size, latent_dim, num_svg_tokens, context_di
     pbar.close()
     print("Training finished!"); print(f"Best eval loss: {best_eval_loss:.4f}")
     if os.path.exists(best_model_path): print(f"Best model saved: {best_model_path}")
-
-
-# --- Main Execution (Example - Adapt for your actual training) ---
-if __name__ == '__main__':
-    # --- Model & Training Parameters ---
-    LATENT_DIM = 32 # Based on your earlier discussions of mu_std
-    NUM_SVG_TOKENS = 1024 # N, the sequence length for SVG latents
-    HIDDEN_DIM = 512 # d_model from VPVAE config (config["encoder_d_model"])
-    CONTEXT_DIM = 768 # Dimension of CLIP last_hidden_state (e.g., 768 for ViT-B/32)
-    NUM_BLOCKS = 12 # L
-    NUM_HEADS = 8 # From VPVAE config (config["num_heads"])
-    MLP_RATIO = 4.0 # For consistency with TransformerBlock d_ff=d_model*4
-    DROPOUT = 0.1
-    MAX_TEXT_SEQ_LEN = 77 # Max sequence length from CLIP tokenizer
-
-    BATCH_SIZE = 16
-    LEARNING_RATE = 1e-4
-    TRAIN_STEPS = 1001 # Keep short for testing this script
-    NUM_TIMESTEPS = 1000
-
-    CFG_PROB = 0.1
-    CFG_SCALE_EVAL = 4.0
-    LOG_INTERVAL = 10
-    EVAL_INTERVAL = 250
-    MODEL_SAVE_DIR = "saved_models_vsdit_seqcond" # New directory
-
-    if HIDDEN_DIM % NUM_HEADS != 0: raise ValueError("HIDDEN_DIM must be divisible by NUM_HEADS")
-
-    config = locals() # Capture parameters in a dict for potential logging/use
-
-    vs_dit_model = VS_DiT(
-        latent_dim=LATENT_DIM, hidden_dim=HIDDEN_DIM, context_dim=CONTEXT_DIM,
-        num_blocks=NUM_BLOCKS, num_heads=NUM_HEADS, mlp_ratio=MLP_RATIO, dropout=DROPOUT
-    )
-    print(f"Model Parameters: {sum(p.numel() for p in vs_dit_model.parameters() if p.requires_grad) / 1e6:.2f} M")
-
-    # NOTE: This runs training with SIMULATED sequence data.
-    # You would replace the train function call with your actual
-    # training loop from train_vsdit_with_clip.py, passing real data.
-    print("\n--- Running internal training simulation ---")
-    train(
-        model=vs_dit_model, train_steps=TRAIN_STEPS, batch_size=BATCH_SIZE,
-        latent_dim=LATENT_DIM, num_svg_tokens=NUM_SVG_TOKENS, context_dim=CONTEXT_DIM,
-        num_timesteps=NUM_TIMESTEPS, cfg_prob=CFG_PROB, log_interval=LOG_INTERVAL,
-        eval_interval=EVAL_INTERVAL, cfg_scale_eval=CFG_SCALE_EVAL, target_device=device,
-        model_save_dir=MODEL_SAVE_DIR, max_text_seq_len=MAX_TEXT_SEQ_LEN
-    )
-
-# --- END OF FILE vp_dit.py ---
