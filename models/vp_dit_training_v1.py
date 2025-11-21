@@ -25,8 +25,8 @@ sys.path.append(".") # Add current directory as well
 # --- Import Model and Utils from vp_dit.py ---
 try:
     # --- MODIFIED: Ensure importing the correct classes for sequence conditioning ---
-    from vp_dit_v1 import VS_DiT, TimestepEmbedder, MLP, VS_DiT_Block # Included these for self-containment
-    from vp_dit_v1 import get_linear_noise_schedule, precompute_diffusion_parameters, noise_latent, ddim_sample
+    from models import VS_DiT, TimestepEmbedder, MLP, VS_DiT_Block # Included these for self-containment
+    from models import get_linear_noise_schedule, precompute_diffusion_parameters, noise_latent, ddim_sample
     print("Successfully imported VS_DiT model components and diffusion utilities.")
 except ImportError as e:
     print(f"Error importing from vp_dit.py: {e}")
@@ -58,51 +58,81 @@ except Exception as e:
      print(f"Error loading captions: {e}"); sys.exit(1)
 
 # --- zDataset Definition (FROM prepare_latents.py) ---
+# class zDataset(Dataset):
+#     def __init__(self, z_data_list): # Removed captions_dict, as it's part of z_data_list now
+#         # z_data_list is a list of dicts: [{'filename': str, 'z': np.array, 'text': str}, ...]
+#         self.z_data = z_data_list
+#         # Stack z tensors for statistics calculation, ensure they are torch.Tensors
+#         # Assuming z is already [L_svg, latent_dim] numpy array
+#         all_z_tensors = [torch.from_numpy(item['z']) for item in z_data_list]
+        
+#         # We need to handle variable sequence lengths of z
+#         # For global stats across *all valid tokens*:
+#         concatenated_valid_z_tokens = []
+#         for z_tensor in all_z_tensors:
+#             # Assuming padding tokens in z are zeros and we want to exclude them.
+#             # If the VPVAEEncoder zeroed out padding, we can filter non-zero rows.
+#             # A more robust way would be to pass the actual svg_mask_batch from preprocessing.
+#             # For now, if z is [L_svg, latent_dim] and zeros mean padding, filter them.
+#             # If all tokens are valid, just append.
+#             # For simplicity here, we assume all tokens in 'z' numpy array are valid latent codes for the purpose of global stats.
+#             concatenated_valid_z_tokens.append(z_tensor.view(-1, z_tensor.shape[-1]))
+
+#         if concatenated_valid_z_tokens:
+#             all_valid_z_tokens_flat = torch.cat(concatenated_valid_z_tokens, dim=0)
+#             if all_valid_z_tokens_flat.numel() > 0:
+#                 self.z_mean = all_valid_z_tokens_flat.mean(0, keepdim=True) # [1, latent_dim]
+#                 self.z_std = all_valid_z_tokens_flat.std(0, keepdim=True)   # [1, latent_dim]
+#             else:
+#                 # Fallback if somehow all z_tensors are empty
+#                 self.z_mean = torch.zeros(1, z_data_list[0]['z'].shape[-1])
+#                 self.z_std = torch.ones(1, z_data_list[0]['z'].shape[-1])
+#         else:
+#             # Fallback if z_data_list is empty
+#             self.z_mean = torch.zeros(1, z_data_list[0]['z'].shape[-1] if z_data_list else 32)
+#             self.z_std = torch.ones(1, z_data_list[0]['z'].shape[-1] if z_data_list else 32)
+        
+#         self.z_std = torch.where(self.z_std < 1e-8, torch.tensor(1e-8), self.z_std) # Clamp std to avoid division by zero
+
+#         print(f"zDataset initialized. Global Z mean: {self.z_mean.mean().item():.4f}, std: {self.z_std.mean().item():.4f}")
+
+#     def __len__(self): return len(self.z_data)
+
+#     def __getitem__(self, idx):
+#         item = self.z_data[idx]
+#         z = torch.tensor(item['z'], dtype=torch.float32)
+#         #z_normalized = (z - self.z_mean) / self.z_std # Normalization happens in the model's first layer, if desired
+#         return {'z': z, 'text': item['text'], 'filename': item['filename']} # Return raw z
 class zDataset(Dataset):
-    def __init__(self, z_data_list): # Removed captions_dict, as it's part of z_data_list now
-        # z_data_list is a list of dicts: [{'filename': str, 'z': np.array, 'text': str}, ...]
-        self.z_data = z_data_list
-        # Stack z tensors for statistics calculation, ensure they are torch.Tensors
-        # Assuming z is already [L_svg, latent_dim] numpy array
-        all_z_tensors = [torch.from_numpy(item['z']) for item in z_data_list]
+    def __init__(self, z_file_list_path, mean_path='/Users/varun_jagannath/Documents/D/svgfusion_v2/models/z_mean_v1.pt', std_path='/Users/varun_jagannath/Documents/D/svgfusion_v2/models/z_std_v1.pt'):
+        # z_file_list_path points to the list of dicts: [{'path': str, 'text': str}, ...]
+        print(f"Loading latent file list from: {z_file_list_path}")
+        self.z_data_info = torch.load(z_file_list_path)
+        print(f"Found {len(self.z_data_info)} total latent samples (all stages).")
+
+        # --- Load pre-calculated mean and std ---
+        if not (os.path.exists(mean_path) and os.path.exists(std_path)):
+            print(f"ERROR: Statistics files not found ('{mean_path}', '{std_path}').")
+            print("Please run the `compute_z_stats.py` script first on your new latent dataset.")
+            sys.exit(1)
+            
+        self.z_mean = torch.load(mean_path)
+        self.z_std = torch.load(std_path)
         
-        # We need to handle variable sequence lengths of z
-        # For global stats across *all valid tokens*:
-        concatenated_valid_z_tokens = []
-        for z_tensor in all_z_tensors:
-            # Assuming padding tokens in z are zeros and we want to exclude them.
-            # If the VPVAEEncoder zeroed out padding, we can filter non-zero rows.
-            # A more robust way would be to pass the actual svg_mask_batch from preprocessing.
-            # For now, if z is [L_svg, latent_dim] and zeros mean padding, filter them.
-            # If all tokens are valid, just append.
-            # For simplicity here, we assume all tokens in 'z' numpy array are valid latent codes for the purpose of global stats.
-            concatenated_valid_z_tokens.append(z_tensor.view(-1, z_tensor.shape[-1]))
+        print(f"Loaded pre-calculated stats. Global Z mean: {self.z_mean.mean().item():.4f}, std: {self.z_std.mean().item():.4f}")
 
-        if concatenated_valid_z_tokens:
-            all_valid_z_tokens_flat = torch.cat(concatenated_valid_z_tokens, dim=0)
-            if all_valid_z_tokens_flat.numel() > 0:
-                self.z_mean = all_valid_z_tokens_flat.mean(0, keepdim=True) # [1, latent_dim]
-                self.z_std = all_valid_z_tokens_flat.std(0, keepdim=True)   # [1, latent_dim]
-            else:
-                # Fallback if somehow all z_tensors are empty
-                self.z_mean = torch.zeros(1, z_data_list[0]['z'].shape[-1])
-                self.z_std = torch.ones(1, z_data_list[0]['z'].shape[-1])
-        else:
-            # Fallback if z_data_list is empty
-            self.z_mean = torch.zeros(1, z_data_list[0]['z'].shape[-1] if z_data_list else 32)
-            self.z_std = torch.ones(1, z_data_list[0]['z'].shape[-1] if z_data_list else 32)
-        
-        self.z_std = torch.where(self.z_std < 1e-8, torch.tensor(1e-8), self.z_std) # Clamp std to avoid division by zero
-
-        print(f"zDataset initialized. Global Z mean: {self.z_mean.mean().item():.4f}, std: {self.z_std.mean().item():.4f}")
-
-    def __len__(self): return len(self.z_data)
+    def __len__(self):
+        return len(self.z_data_info)
 
     def __getitem__(self, idx):
-        item = self.z_data[idx]
-        z = torch.tensor(item['z'], dtype=torch.float32)
-        # z_normalized = (z - self.z_mean) / self.z_std # Normalization happens in the model's first layer, if desired
-        return {'z': z, 'text': item['text'], 'filename': item['filename']} # Return raw z
+        item_info = self.z_data_info[idx]
+        
+        # Load the latent tensor on-demand from its individual file
+        # This is very memory efficient.
+        z = torch.load(item_info['path'])
+        
+        # We return the raw z. Normalization will happen in the training loop.
+        return {'z': z, 'text': item_info['text'], 'filename': os.path.basename(item_info['path'])}
 
 
 def cosine_warmup_scheduler(optimizer, warmup_steps, total_steps, initial_lr, min_lr):
@@ -130,6 +160,7 @@ def collate_fn_zdataset(batch):
     
     padded_z_tensors = []
     text_prompts = []
+    latent_masks = []
     filenames = []
 
     for item in batch:
@@ -139,11 +170,28 @@ def collate_fn_zdataset(batch):
         # Assuming zeros correspond to padding in the latent space
         padded_z = F.pad(z_tensor, (0, 0, 0, pad_len), "constant", 0)
         padded_z_tensors.append(padded_z)
+        
+        # Create mask: 1 for valid, 0 for padding
+        # Since VAE zeroes out padding, we detect non-zero rows in the original z_tensor
+        # We also handle any additional padding added by the collate_fn (pad_len)
+        
+        # Check for non-zero rows in the input tensor
+        is_valid_row = z_tensor.abs().sum(dim=-1) > 1e-6 # [Seq_Len]
+        
+        # Append False for any extra padding added by collate
+        if pad_len > 0:
+            mask = torch.cat([is_valid_row, torch.zeros(pad_len, dtype=torch.bool)])
+        else:
+            mask = is_valid_row
+            
+        latent_masks.append(mask)
+        
         text_prompts.append(item['text'])
         filenames.append(item['filename'])
 
     return {
         'z': torch.stack(padded_z_tensors), # Shape: [B, max_seq_len_batch, latent_dim]
+        'latent_mask': torch.stack(latent_masks), # Shape: [B, max_seq_len_batch]
         'text': text_prompts, # List of strings
         'filename': filenames # List of strings
     }
@@ -159,27 +207,27 @@ if __name__ == "__main__":
     # This allows config to be easily accessible and potentially modified before init
     initial_config = {
         # Training Params
-        "learning_rate": 2e-4,
-        "total_steps": 10000,
+        "learning_rate": 1e-4,
+        "total_steps": 50000,
         "batch_size": 8,
-        "warmup_steps": 200,
-        "lr_decay_min": 2e-6,
+        "warmup_steps": 500,
+        "lr_decay_min": 1e-6,
         "weight_decay": 0.1,
-        "log_interval": 50,
+        "log_interval": 20,
         "eval_interval": 500,
         "val_split": 0.05,
         "seed": 42,
-        "cfg_dropout_prob": 0.1, # Probability to drop out conditional context during training
+        "cfg_dropout_prob": 0.25, # Probability to drop out conditional context during training
         "cfg_scale_eval": 7.0,   # Guidance scale for DDIM sampling during evaluation (set to 0 for unconditional)
         "grad_clip_norm": 2.0,
 
         # Model Params (These will be dynamically inferred/verified)
         "latent_dim": None, # Will be inferred from zDataset
         "num_svg_tokens": None, # Will be inferred (max_seq_len_train from VAE)
-        "hidden_dim": 512,        # Internal DiT dimension (d_model from VPVAE)
+        "hidden_dim": 384,        # Internal DiT dimension (d_model from VPVAE)
         "context_dim": 768,       # CLIP ViT-B/32 last_hidden_state is 768
         "num_blocks": 12,         # Number of DiT blocks
-        "num_heads": 8,           # hidden_dim=512 divisible by 8
+        "num_heads": 6,           # hidden_dim=512 divisible by 8
         "mlp_ratio": 4.0,         # MLP expansion ratio (d_ff = hidden_dim * mlp_ratio)
         "dropout": 0.1,
 
@@ -188,29 +236,36 @@ if __name__ == "__main__":
         "beta_start": 0.0001,
         "beta_end": 0.02,
         "ddim_eta": 0.0, # 0.0 for deterministic DDIM
+        "fp32_attention": True, # Force attention in FP32 to prevent NaN/Inf
 
         # Data/Paths
-        "z_dataset_path": "./zdataset_vpvae_patch_tokens.pt", # Path to the prepared zDataset object
-        "clip_model_path": "./clip-vit-large-patch14", # HuggingFace CLIP model name
+        "z_dataset_path": "./z_latents_file_list.pt", # Path to the prepared zDataset object
+        "clip_model_path": "/Users/varun_jagannath/Documents/D/test python/clip-vit-large-patch14", # HuggingFace CLIP model name
         "output_model_dir": "saved_models_vsdit_clip_second_patch" # New directory
     }
 
     # --- Setup Device ---
     if torch.cuda.is_available(): device = torch.device("cuda")
-    #elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): device = torch.device("mps")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): device = torch.device("mps")
     else: device = torch.device("cpu")
     print(f"Using device: {device}")
 
     # --- Load zDataset ---
-    print(f"Loading zDataset from '{initial_config['z_dataset_path']}'...")
+    # print(f"Loading zDataset from '{initial_config['z_dataset_path']}'...")
+    # try:
+    #     # Loaded data is expected to be the zDataset object itself
+    #     full_zdataset = torch.load(initial_config['z_dataset_path'])
+    #     if not isinstance(full_zdataset, zDataset):
+    #         raise ValueError("Loaded data is not an instance of zDataset. Ensure prepare_latents.py saves the zDataset object directly.")
+    #     print(f"Initialized zDataset with {len(full_zdataset)} items.")
+    # except FileNotFoundError:
+    #     print(f"Error: zDataset file not found: {initial_config['z_dataset_path']}"); sys.exit(1)
+    # except Exception as e:
+    #     print(f"Error loading/initializing zDataset: {e}"); traceback.print_exc(); sys.exit(1)
+    print(f"Loading zDataset using file list from '{initial_config['z_dataset_path']}'...")
     try:
-        # Loaded data is expected to be the zDataset object itself
-        full_zdataset = torch.load(initial_config['z_dataset_path'],  weights_only=False)
-        if not isinstance(full_zdataset, zDataset):
-            raise ValueError("Loaded data is not an instance of zDataset. Ensure prepare_latents.py saves the zDataset object directly.")
+        full_zdataset = zDataset(z_file_list_path=initial_config['z_dataset_path'])
         print(f"Initialized zDataset with {len(full_zdataset)} items.")
-    except FileNotFoundError:
-        print(f"Error: zDataset file not found: {initial_config['z_dataset_path']}"); sys.exit(1)
     except Exception as e:
         print(f"Error loading/initializing zDataset: {e}"); traceback.print_exc(); sys.exit(1)
 
@@ -288,11 +343,12 @@ if __name__ == "__main__":
         num_blocks=config.num_blocks,
         num_heads=config.num_heads,
         mlp_ratio=config.mlp_ratio,
-        dropout=config.dropout
+        dropout=config.dropout,
+        fp32_attention=config.fp32_attention
     )
     print(f"VS_DiT Model Parameters: {sum(p.numel() for p in vpdit_model.parameters() if p.requires_grad) / 1e6:.2f} M")
 
-    vpdit_model.initialize_weights() # Apply custom weight initialization
+    #vpdit_model.initialize_weights() # Apply custom weight initialization
 
     # --- Setup Diffusion Parameters ---
     print("Setting up diffusion parameters...")
@@ -301,7 +357,7 @@ if __name__ == "__main__":
 
     # --- Optimizer & Scheduler ---
     optimizer = optim.AdamW(vpdit_model.parameters(), lr=config.learning_rate,
-                            weight_decay=config.weight_decay, betas=(0.9, 0.95))
+                            weight_decay=config.weight_decay, betas=(0.9, 0.999))
     print("Using custom cosine_warmup_scheduler.")
     scheduler = cosine_warmup_scheduler(
                     optimizer,
@@ -365,7 +421,16 @@ if __name__ == "__main__":
                 pbar.update(1)
                 continue
 
-            z0_batch = batch['z'].to(target_device) # Normalized z: [B, N, latent_dim]
+            ### applying normalization to z
+            # 1. Load the raw data from the batch
+            z0_raw = batch['z'].to(target_device)
+            
+            z_mean = train_loader.dataset.dataset.z_mean.to(target_device)
+            z_std = train_loader.dataset.dataset.z_std.to(target_device)
+            
+            z0_batch = (z0_raw - z_mean) / z_std
+            
+            #z0_batch = batch['z'].to(target_device) # Normalized z: [B, N, latent_dim]
             text_prompts = batch['text'] # List of strings
             current_batch_size = z0_batch.shape[0] # Get actual batch size, might be smaller for last batch
             optimizer.zero_grad()
@@ -400,11 +465,32 @@ if __name__ == "__main__":
             t = torch.randint(0, config.noise_steps, (current_batch_size,), device=target_device).long()
             zt_batch, noise_batch = noise_latent(z0_batch, t, diff_params, target_device)
 
-            # 4. Forward pass with mixed context
-            predicted_noise = model(zt_batch, t, context_final, mask_final)
+            # Get latent mask (True = Valid)
+            latent_mask = batch['latent_mask'].to(target_device) # [B, N]
+            latent_padding_mask = ~latent_mask # (True = Padding)
 
-            # 5. Calculate loss
-            loss = criterion(predicted_noise, noise_batch)
+            # 4. Forward pass with mixed context
+            predicted_noise = model(zt_batch, t, context_final, mask_final, latent_mask=latent_padding_mask)
+
+            # 5. Calculate loss with masking
+            # MSE Loss per element
+            loss_unreduced = F.mse_loss(predicted_noise, noise_batch, reduction='none') # [B, N, D]
+            
+            # Expand mask to [B, N, D]
+            latent_mask_expanded = latent_mask.unsqueeze(-1).expand_as(loss_unreduced)
+            
+            # Apply mask: zero out loss for padding tokens
+            loss_masked = loss_unreduced * latent_mask_expanded.float()
+            
+            # Average over valid elements only
+            # Sum of valid elements
+            num_valid_elements = latent_mask_expanded.sum()
+            
+            if num_valid_elements > 0:
+                loss = loss_masked.sum() / num_valid_elements
+            else:
+                loss = loss_masked.sum() * 0.0 # Should not happen if batch is not empty
+
             if torch.isnan(loss).any() or torch.isinf(loss).any(): 
                 print(f"NaN/Inf loss at step {global_step}. Skipping."); 
                 optimizer.zero_grad(); 
@@ -453,8 +539,28 @@ if __name__ == "__main__":
 
                             t_eval = torch.randint(0, config.noise_steps, (eval_batch_size,), device=target_device).long()
                             zt_eval, noise_eval = noise_latent(z0_eval, t_eval, diff_params, target_device)
-                            predicted_noise_eval = model(zt_eval, t_eval, eval_context_seq, eval_mask)
-                            eval_loss = criterion(predicted_noise_eval, noise_eval)
+                            
+                            # Get latent mask for eval
+                            latent_mask_eval = eval_batch['latent_mask'].to(target_device)
+                            latent_padding_mask_eval = ~latent_mask_eval
+                            
+                            # Pass mask to model
+                            predicted_noise_eval = model(zt_eval, t_eval, eval_context_seq, eval_mask, latent_mask=latent_padding_mask_eval)
+                            
+                            # Calculate Masked Eval Loss
+                            loss_unreduced_eval = F.mse_loss(predicted_noise_eval, noise_eval, reduction='none')
+                            latent_mask_expanded_eval = latent_mask_eval.unsqueeze(-1).expand_as(loss_unreduced_eval)
+                            
+                            # Zero out loss for padding
+                            loss_masked_eval = loss_unreduced_eval * latent_mask_expanded_eval.float()
+                            
+                            # Average over valid elements
+                            num_valid_elements_eval = latent_mask_expanded_eval.sum()
+                            
+                            if num_valid_elements_eval > 0:
+                                eval_loss = loss_masked_eval.sum() / num_valid_elements_eval
+                            else:
+                                eval_loss = torch.tensor(0.0, device=target_device)
 
                             if not torch.isnan(eval_loss).any() and not torch.isinf(eval_loss).any():
                                 total_eval_loss += eval_loss.item(); num_eval_batches += 1
@@ -476,7 +582,7 @@ if __name__ == "__main__":
                             except Exception as e:
                                 print(f"Warning: Failed to log best model artifact: {e}")
 
-                    # # --- Run DDIM Sampling (Optional during eval) ---
+                    # --- Run DDIM Sampling (Optional during eval) ---
                     # print("Running DDIM sampling (example)...")
                     # num_samples_to_generate = min(4, config.batch_size)
                     # sample_prompts = [
