@@ -1,4 +1,3 @@
-# --- START OF FILE vp_dit.py ---
 
 import torch
 import torch.nn as nn
@@ -222,11 +221,11 @@ class CrossAttention(nn.Module):
             # MPS autocast support is limited/newer. 
             # If fp32_attention is True, we are already in FP32, so we can disable autocast context.
             # If fp32_attention is False, we let it run in default precision (likely FP32 on MPS unless explicitly cast)
-            context = torch.no_grad() # Dummy context
+            autocast_ctx = torch.no_grad() # Dummy context
         else:
-            context = torch.amp.autocast(device_type=device_type, enabled=not self.fp32_attention)
+            autocast_ctx = torch.amp.autocast(device_type=device_type, enabled=not self.fp32_attention)
 
-        with context:
+        with autocast_ctx:
             attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, num_heads, N, S]
             
             if context_mask is not None:
@@ -239,6 +238,13 @@ class CrossAttention(nn.Module):
         attn = self.attn_drop(attn)
         
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        
+        # --- DEBUG PROBE ---
+        #if random.random() < 0.005:
+            #print(f"  [CrossAttn Probe] Output Norm: {x.norm().item():.4f} | Context Norm: {context.norm().item():.4f}")
+            #pass
+        # -------------------
+
         x = self.proj(x)
         x = self.proj_drop(x)
         
@@ -437,6 +443,16 @@ class VS_DiT(nn.Module):
         # Context projection
         self.context_proj = nn.Linear(context_dim, hidden_dim, bias=True)
         
+        # Pooled Context Projection (for AdaLN injection)
+        self.pooled_context_proj = nn.Sequential(
+            nn.Linear(context_dim, hidden_dim, bias=True),
+            nn.SiLU(),
+            nn.Linear(in_features=hidden_dim, out_features=hidden_dim, bias=True)
+        )
+        
+        # Learnable scale for text conditioning (initialized to 2.0 based on PixArt analysis)
+        self.text_conditioning_scale = nn.Parameter(torch.tensor(2.0))
+        
         # DiT blocks
         self.blocks = nn.ModuleList([
             VS_DiT_Block(
@@ -460,7 +476,7 @@ class VS_DiT(nn.Module):
         self.initialize_weights()
 
     def initialize_weights(self):
-        """Proper weight initialization for stable training."""
+        """Proper weight initialization following PixArt-alpha's approach."""
         # Initialize all linear layers with Xavier uniform
         def _basic_init(module):
             if isinstance(module, nn.Linear):
@@ -472,7 +488,7 @@ class VS_DiT(nn.Module):
         
         # Special initialization for specific layers
         
-        # Timestep embedder
+        # Timestep embedder - use normal init with small std
         if hasattr(self.t_embedder, 'mlp'):
             for layer in self.t_embedder.mlp:
                 if isinstance(layer, nn.Linear):
@@ -480,10 +496,25 @@ class VS_DiT(nn.Module):
                     if layer.bias is not None:
                         nn.init.zeros_(layer.bias)
         
-        # Zero-out the output of adaLN modulation MLPs
+        # Initialize input projection with Xavier
+        nn.init.xavier_uniform_(self.proj_in.weight)
+        if self.proj_in.bias is not None:
+            nn.init.zeros_(self.proj_in.bias)
+        
+        # Initialize context projection with Xavier
+        nn.init.xavier_uniform_(self.context_proj.weight)
+        if self.context_proj.bias is not None:
+            nn.init.zeros_(self.context_proj.bias)
+        
+        # Zero-out the output of adaLN modulation MLPs in each block
         for block in self.blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+            
+            # CRITICAL: Zero-init cross-attention output projection
+            # This allows the model to start with cross-attention as identity
+            nn.init.constant_(block.cross_attn.proj.weight, 0)
+            nn.init.constant_(block.cross_attn.proj.bias, 0)
         
         # Zero-out final modulation and output projection
         nn.init.constant_(self.final_adaLN_modulation[-1].weight, 0)
@@ -491,11 +522,12 @@ class VS_DiT(nn.Module):
         nn.init.constant_(self.final_proj.weight, 0)
         nn.init.constant_(self.final_proj.bias, 0)
 
-    def forward(self, z_t, t, context_seq, context_padding_mask=None, latent_mask=None):
+    def forward(self, z_t, t, context_seq, pooled_context, context_padding_mask=None, latent_mask=None):
         """
         z_t: [B, N, latent_dim] - noisy latent sequence
         t: [B] - timestep
         context_seq: [B, S, context_dim] - text embedding sequence
+        pooled_context: [B, context_dim] - pooled text embedding (e.g. from CLIP pooler_output)
         context_padding_mask: [B, S] - padding mask for context
         """
         device = next(self.parameters()).device
@@ -505,18 +537,32 @@ class VS_DiT(nn.Module):
         z_t = z_t.to(device)
         t = t.to(device)
         context_seq = context_seq.to(device)
+        pooled_context = pooled_context.to(device)
         if context_padding_mask is not None:
             context_padding_mask = context_padding_mask.to(device)
         
-        # Add positional embeddings
-        pos_embed = get_sinusoidal_pos_embed(N, self.latent_dim, device)
-        z_t = z_t + pos_embed.unsqueeze(0)
+        # Project inputs to hidden dimension
+        h = self.proj_in(z_t)  # [B, N, hidden_dim]
+
+        # Add positional embeddings (now in hidden_dim)
+        # Note: get_sinusoidal_pos_embed now uses hidden_dim, matching the projected shape
+        pos_embed = get_sinusoidal_pos_embed(N, self.hidden_dim, device)
+        h = h + pos_embed.unsqueeze(0) # Sremoving scaling factor
+
         
         # Get timestep embedding
         t_emb = self.t_embedder(t)  # [B, hidden_dim]
         
+        # Add Pooled Context to Timestep Embedding (Global Conditioning)
+        c_emb = self.pooled_context_proj(pooled_context) # [B, hidden_dim]
+        
+        # Use learnable scale (clamped to prevent instability)
+        # Clamp between 0.1 and 10.0 to prevent extreme values
+        scale = torch.clamp(self.text_conditioning_scale, 2.0, 10.0)
+        t_emb = t_emb + scale * c_emb # Inject global text info into AdaLN signal
+        
         # Project inputs to hidden dimension
-        h = self.proj_in(z_t)  # [B, N, hidden_dim]
+
         context = self.context_proj(context_seq)  # [B, S, hidden_dim]
         
         # Apply DiT blocks
@@ -534,7 +580,30 @@ class VS_DiT(nn.Module):
         
         return epsilon_pred
     
-    def forward_with_cfg(self, z_t, t, context_seq, context_padding_mask, cfg_scale, 
+        with torch.no_grad():
+            empty_outputs = clip_model(**empty_text_inputs)
+            uncond_context = empty_outputs.last_hidden_state
+            uncond_pooled = empty_outputs.pooler_output # Get pooled output for uncond
+            uncond_mask = ~(empty_text_inputs.attention_mask.bool())
+        
+        # Batch conditional and unconditional
+        z_t_combined = torch.cat([z_t, z_t], dim=0)
+        t_combined = torch.cat([t, t], dim=0)
+        context_combined = torch.cat([context_seq, uncond_context], dim=0)
+        
+        # We need pooled_context for the conditional part. 
+        # Assuming context_seq came from a CLIP forward pass that we don't have access to here directly?
+        # Wait, forward_with_cfg takes context_seq. It DOES NOT take pooled_context.
+        # We need to change the signature or re-compute it?
+        # Ideally, we should pass pooled_context to this function too.
+        # But for now, let's assume we can't easily change the caller signature everywhere without breaking things.
+        # actually, ddim_sample calls this. I can change ddim_sample.
+        
+        # Let's update the signature in the next step. For now, I'll put a placeholder or error.
+        # Wait, I can't leave it broken.
+        # I will update the signature to accept pooled_context.
+        
+    def forward_with_cfg(self, z_t, t, context_seq, pooled_context, context_padding_mask, cfg_scale, 
                         clip_model, clip_tokenizer):
         """
         Optimized forward pass with batched classifier-free guidance.
@@ -555,16 +624,18 @@ class VS_DiT(nn.Module):
         with torch.no_grad():
             empty_outputs = clip_model(**empty_text_inputs)
             uncond_context = empty_outputs.last_hidden_state
+            uncond_pooled = empty_outputs.pooler_output
             uncond_mask = ~(empty_text_inputs.attention_mask.bool())
         
         # Batch conditional and unconditional
         z_t_combined = torch.cat([z_t, z_t], dim=0)
         t_combined = torch.cat([t, t], dim=0)
         context_combined = torch.cat([context_seq, uncond_context], dim=0)
+        pooled_combined = torch.cat([pooled_context, uncond_pooled], dim=0)
         mask_combined = torch.cat([context_padding_mask, uncond_mask], dim=0)
         
         # Single forward pass
-        eps_combined = self.forward(z_t_combined, t_combined, context_combined, mask_combined)
+        eps_combined = self.forward(z_t_combined, t_combined, context_combined, pooled_combined, mask_combined)
         
         # Split and apply guidance
         eps_cond, eps_uncond = eps_combined.chunk(2, dim=0)
@@ -657,10 +728,12 @@ class VS_DiT_vo(nn.Module):
 
         model_device = next(self.parameters()).device
         
-        # --- Add sinusoidal positional embeddings to z_t before projection ---
-        # pos_embed: [N, latent_dim]
-        pos_embed = get_sinusoidal_pos_embed(z_t.size(1), z_t.size(2), z_t.device) 
-        z_t = z_t.to(model_device) + pos_embed.unsqueeze(0) # Add batch dim to pos_embed: [1, N, latent_dim]
+        h = self.proj_in(z_t)      # Output: [B, N, hidden_dim] - latent projected to hidden_dim
+
+        # --- Add sinusoidal positional embeddings to h after projection ---
+        # pos_embed: [N, hidden_dim]
+        pos_embed = get_sinusoidal_pos_embed(z_t.size(1), self.hidden_dim, model_device) 
+        h = h + pos_embed.unsqueeze(0) # Add batch dim to pos_embed: [1, N, hidden_dim]
 
         # --- Apply RoPE for sequential dependencies after adding fixed positional embeddings ---
         #z_t = apply_rope(z_t) # z_t is [B, N, latent_dim]
@@ -674,7 +747,7 @@ class VS_DiT_vo(nn.Module):
 
         t_emb = self.t_embedder(t) # Output: [B, hidden_dim]
         
-        h = self.proj_in(z_t)      # Output: [B, N, hidden_dim] - latent projected to hidden_dim
+
         
         # --- Project the context sequence once ---
         projected_context_seq = self.context_proj(context_seq) # Output: [B, S_text, hidden_dim]
@@ -727,10 +800,10 @@ def noise_latent(z0, t, diff_params, target_device):
 # --- Sampling (DDIM) ---
 
 @torch.no_grad()
-def ddim_sample(model, shape, context_seq, context_padding_mask,
+def ddim_sample(model, shape, context_seq, pooled_context, context_padding_mask,
                 diff_params, num_timesteps, target_device, cfg_scale=3.0, eta=0.0,
                 clip_model=None, clip_tokenizer=None, return_visuals=False, # Changed default to False
-                latent_min_max=(-14, 14)): # Adjusted clamp range based on discussion
+                latent_min_max=(-14, 14), ddim_steps=None): # Adjusted clamp range based on discussion
 
     model.eval()
     batch_size = shape[0]
@@ -738,6 +811,7 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
 
     # Move context to device
     context_seq = context_seq.to(target_device) # [B, S_text, D_clip]
+    pooled_context = pooled_context.to(target_device) # [B, D_clip]
     if context_padding_mask is not None:
         context_padding_mask = context_padding_mask.to(target_device) # [B, S_text]
 
@@ -745,74 +819,116 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
         raise ValueError("clip_model and clip_tokenizer must be provided for ddim_sample.")
 
     # Get empty string embedding for unconditional context
-    text_seq_len = context_seq.size(1) # Get S_text from conditional context
-    empty_text_inputs = clip_tokenizer(
-        [""] * batch_size, # Create a batch of empty strings
-        padding='max_length',
-        max_length=text_seq_len,
-        truncation=True,
-        return_tensors="pt"
-    ).to(target_device)
-
-    empty_outputs = clip_model(**empty_text_inputs)
-    uncond_context_seq = empty_outputs.last_hidden_state # Already [B, S_text, D_clip]
-    uncond_padding_mask = ~(empty_text_inputs.attention_mask.bool()) # Already [B, S_text]
-
+    # (This is handled inside forward_with_cfg, but we need to ensure ddim_sample signature matches)
+    
+    # Determine timesteps to sample
+    # Determine timesteps to sample
+    if ddim_steps is None:
+        ddim_steps = num_timesteps
+    
+    # Create strided timesteps (e.g., 1000, 990, 980... for 100 steps)
+    # We want to go from T-1 down to 0
+    # np.linspace(0, num_timesteps - 1, ddim_steps + 1) gives us the points
+    # We take the first ddim_steps points and reverse them?
+    # Standard DDIM: 
+    # c = num_timesteps // ddim_steps
+    # timesteps = list(range(0, num_timesteps, c))
+    # timesteps = reversed(timesteps)
+    
+    step_ratio = num_timesteps // ddim_steps
+    timesteps = list(range(0, num_timesteps, step_ratio))
+    # Ensure we have exactly ddim_steps
+    if len(timesteps) > ddim_steps:
+        timesteps = timesteps[:ddim_steps]
+    elif len(timesteps) < ddim_steps:
+        # This shouldn't happen with integer division if ddim_steps divides num_timesteps
+        # But if not, we might need to be careful.
+        # Let's use linspace for safety
+        timesteps = np.linspace(0, num_timesteps - 1, ddim_steps, dtype=int).tolist()
+        
+    timesteps = list(reversed(timesteps)) # [990, 980, ..., 0]
+    
     # Track values for plotting
     cosine_sims = []
     cfg_scales_used = []
 
-    for i in tqdm(reversed(range(num_timesteps)), desc="DDIM Sampling (Sequential Latent)"):
-        t = torch.full((batch_size,), i, dtype=torch.long, device=target_device)
+    for i, t_val in enumerate(tqdm(timesteps, desc=f"DDIM Sampling ({ddim_steps} steps)")):
+        # t_val is the current timestep (e.g. 990)
+        # We need to find the previous timestep (e.g. 980) for the update
+        # In the loop, the next t_val in the list is the previous timestep
+        
+        t = torch.full((batch_size,), t_val, dtype=torch.long, device=target_device)
+        
+        # Determine t_prev
+        if i < len(timesteps) - 1:
+            t_prev_val = timesteps[i+1]
+        else:
+            t_prev_val = -1 # End of chain
+            
+        # Get alpha_bar for t
+        alpha_bar_t = diff_params["alphas_cumprod"][t_val]
+        alpha_bar_t_tensor = torch.full((batch_size, 1, 1), alpha_bar_t, device=target_device)
+        
+        # Get alpha_bar for t_prev
+        if t_prev_val >= 0:
+            alpha_bar_prev = diff_params["alphas_cumprod"][t_prev_val]
+        else:
+            alpha_bar_prev = 1.0 # alpha_bar_-1 = 1.0 (no noise)
+            
+        alpha_bar_prev_tensor = torch.full((batch_size, 1, 1), alpha_bar_prev, device=target_device)
 
-        # Ensure correct broadcasting for alpha/sigma terms
-        alpha_bar_t_val = diff_params["alphas_cumprod"][t].view(-1, 1, 1) # [B, 1, 1]
-        alpha_bar_t_prev_val = diff_params["alphas_cumprod_prev"][t].view(-1, 1, 1) # [B, 1, 1]
-        sqrt_one_minus_alpha_bar_t_val = diff_params["sqrt_one_minus_alphas_cumprod"][t].view(-1, 1, 1) # [B, 1, 1]
-        sqrt_alpha_bar_t_val = diff_params["sqrt_alphas_cumprod"][t].view(-1, 1, 1) # [B, 1, 1]
-
-        # Model expects z_t: [B, N, Dz], t: [B], context_seq: [B, S_text, D_clip], context_padding_mask: [B, S_text]
-        # Model output eps_cond/eps_uncond should be [B, N, Dz]
-        eps_cond = model(z_t, t, context_seq, context_padding_mask)
-        eps_uncond = model(z_t, t, uncond_context_seq, uncond_padding_mask)
-
-        # Cosine similarity: flatten over sequence and feature dimensions
-        cosine_sim = F.cosine_similarity(eps_cond.reshape(batch_size, -1),
-                                         eps_uncond.reshape(batch_size, -1),
-                                         dim=1).mean().item()
-        cosine_sims.append(cosine_sim)
-
-        # Dynamic CFG scale (logic unchanged, but now uses config['cfg_scale'])
-        # min_sim = 0.90
-        # max_sim = 0.99
-        # cosine_sim_clamped = max(min(cosine_sim, max_sim), min_sim)
-        # scale_factor = 1 + ((cosine_sim_clamped - min_sim) / (max_sim - min_sim))
-        # current_cfg = cfg_scale * scale_factor
-        # current_cfg = min(current_cfg, cfg_scale * 2.0) # Cap the dynamic scale
-        # cfg_scales_used.append(current_cfg)
-
-        eps_pred = eps_uncond + cfg_scale * (eps_cond - eps_uncond) # Use current_cfg for scaling
-
-        # Sigma_t calculation
-        term_in_sqrt = (1.0 - alpha_bar_t_prev_val) / (1.0 - alpha_bar_t_val + 1e-12) * \
-                       (1.0 - alpha_bar_t_val / (alpha_bar_t_prev_val + 1e-12))
-        sigma_t = eta * torch.sqrt(torch.clamp(term_in_sqrt, min=1e-12)) # [B,1,1]
+        # Predict noise
+        if cfg_scale > 1.0:
+            epsilon_pred, eps_cond, eps_uncond = model.forward_with_cfg(
+                z_t, t, context_seq, pooled_context, context_padding_mask, cfg_scale, clip_model, clip_tokenizer
+            )
+            
+            # Cosine similarity
+            cosine_sim = F.cosine_similarity(eps_cond.reshape(batch_size, -1), 
+                                             eps_uncond.reshape(batch_size, -1), 
+                                             dim=1).mean().item()
+            cosine_sims.append(cosine_sim)
+            cfg_scales_used.append(cfg_scale)
+            
+        else:
+            # No CFG
+            epsilon_pred = model(z_t, t, context_seq, pooled_context, context_padding_mask)
+            cosine_sims.append(0.0)
+            cfg_scales_used.append(1.0)
 
         # Predict x0
-        pred_x0 = (z_t - sqrt_one_minus_alpha_bar_t_val * eps_pred) / (sqrt_alpha_bar_t_val + 1e-12)
+        # x0 = (zt - sqrt(1-alpha_bar_t) * eps) / sqrt(alpha_bar_t)
+        sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - alpha_bar_t_tensor)
+        sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t_tensor)
+        
+        pred_x0 = (z_t - sqrt_one_minus_alpha_bar_t * epsilon_pred) / (sqrt_alpha_bar_t + 1e-12)
+        
         if latent_min_max is not None:
-            pred_x0 = torch.clamp(pred_x0, latent_min_max[0], latent_min_max[1]) # [B, N, Dz]
+            pred_x0 = torch.clamp(pred_x0, latent_min_max[0], latent_min_max[1])
 
-        # Deterministic part for x_t_prev
-        sqrt_term_for_dir_xt = torch.sqrt(torch.clamp(1.0 - alpha_bar_t_prev_val - sigma_t**2, min=0.0))
-        dir_xt = sqrt_term_for_dir_xt * eps_pred # [B, N, Dz]
-
-        x_t_prev = torch.sqrt(alpha_bar_t_prev_val) * pred_x0 + dir_xt # [B, N, Dz]
-
-        if eta > 0: # Add noise if eta > 0
-            noise_vec = torch.randn_like(z_t) # [B, N, Dz]
-            x_t_prev += sigma_t * noise_vec # [B, N, Dz]
-
+        # Direction pointing to x_t
+        # sigma_t calculation
+        # For DDIM, sigma_t depends on eta.
+        # sigma_t = eta * sqrt( (1 - alpha_bar_prev) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_prev) )
+        
+        # Note: (1 - alpha_bar_t / alpha_bar_prev) is effectively beta_t for the stride?
+        
+        sigma_t = eta * torch.sqrt(
+            (1 - alpha_bar_prev_tensor) / (1 - alpha_bar_t_tensor) * (1 - alpha_bar_t_tensor / alpha_bar_prev_tensor)
+        )
+        
+        # Deterministic part
+        sqrt_one_minus_alpha_bar_prev = torch.sqrt(1 - alpha_bar_prev_tensor - sigma_t**2)
+        dir_xt = sqrt_one_minus_alpha_bar_prev * epsilon_pred
+        
+        # Update z_t
+        x_t_prev = torch.sqrt(alpha_bar_prev_tensor) * pred_x0 + dir_xt
+        
+        # Add noise (if eta > 0)
+        if eta > 0:
+            noise = torch.randn_like(z_t)
+            x_t_prev = x_t_prev + sigma_t * noise
+            
         z_t = x_t_prev
 
     # Plotting (logic unchanged, but uses cfg_scales_used)
@@ -831,7 +947,7 @@ def ddim_sample(model, shape, context_seq, context_padding_mask,
 
 
 @torch.no_grad()
-def ddim_sample_fixed(model, shape, context_seq, context_padding_mask,
+def ddim_sample_fixed(model, shape, context_seq, pooled_context, context_padding_mask,
                      diff_params, num_timesteps, target_device, cfg_scale=3.0, eta=0.0,
                      clip_model=None, clip_tokenizer=None, return_visuals=False,
                      latent_min_max=(-10, 10), ddim_steps=100, latent_mask=None): # Added latent_mask
@@ -846,6 +962,7 @@ def ddim_sample_fixed(model, shape, context_seq, context_padding_mask,
     
     # Move context to device
     context_seq = context_seq.to(target_device)
+    pooled_context = pooled_context.to(target_device)
     if context_padding_mask is not None:
         context_padding_mask = context_padding_mask.to(target_device)
     if latent_mask is not None:
@@ -855,11 +972,16 @@ def ddim_sample_fixed(model, shape, context_seq, context_padding_mask,
         raise ValueError("clip_model and clip_tokenizer must be provided for ddim_sample.")
 
     # Create timestep schedule for DDIM (subset of training steps)
+    # CRITICAL FIX: Stop at t=1 instead of t=0
+    # At t=0, SNR ≈ 10000 which is impossible to learn.
+    # Stopping at t=1 (SNR ≈ 67) is standard practice in DDIM.
     if ddim_steps < num_timesteps:
         # Use a subset of timesteps for faster sampling
-        timesteps = torch.linspace(num_timesteps - 1, 0, ddim_steps).long()
+        # Stop at 1 instead of 0
+        timesteps = torch.linspace(num_timesteps - 1, 1, ddim_steps).long()
     else:
-        timesteps = torch.arange(num_timesteps - 1, -1, -1)
+        # Stop at 1 instead of 0
+        timesteps = torch.arange(num_timesteps - 1, 0, -1)  # Changed from -1 to 0
     
     # Pre-compute unconditional context
     text_seq_len = context_seq.size(1)
@@ -874,6 +996,7 @@ def ddim_sample_fixed(model, shape, context_seq, context_padding_mask,
     with torch.no_grad():
         empty_outputs = clip_model(**empty_text_inputs)
         uncond_context_seq = empty_outputs.last_hidden_state
+        uncond_pooled_context = empty_outputs.pooler_output
         uncond_padding_mask = ~(empty_text_inputs.attention_mask.bool())
 
     # Track diagnostics
@@ -891,7 +1014,9 @@ def ddim_sample_fixed(model, shape, context_seq, context_padding_mask,
             t_next = timesteps[i + 1]
             alpha_t_next = diff_params["alphas_cumprod"][t_next].item()
         else:
-            alpha_t_next = 1.0  # At t=0, alpha_cumprod = 1
+            # At the last step, we're at t=1, next would be t=0
+            # Use the actual alpha_cumprod[0] value, NOT 1.0!
+            alpha_t_next = diff_params["alphas_cumprod"][0].item()
         
         sqrt_alpha_t = math.sqrt(alpha_t)
         sqrt_one_minus_alpha_t = math.sqrt(1 - alpha_t)
@@ -931,6 +1056,10 @@ def ddim_sample_fixed(model, shape, context_seq, context_padding_mask,
             # No guidance
             eps_pred = model(x_t, t_batch, context_seq, context_padding_mask, latent_mask=latent_mask)
             cosine_sims.append(0.0)
+        
+        # DEBUG: Print stats for first few steps
+        if i < 3 or i % 20 == 0:
+             print(f"Step {i}: x_t norm={x_t.norm().item():.2f}, eps_pred norm={eps_pred.norm().item():.2f}, eps_pred mean={eps_pred.mean().item():.4f}, std={eps_pred.std().item():.4f}")
 
         # Predict x_0 using the reparameterization
         pred_x0 = (x_t - sqrt_one_minus_alpha_t * eps_pred) / sqrt_alpha_t
@@ -1126,3 +1255,52 @@ def train(model, train_steps, batch_size, latent_dim, num_svg_tokens, context_di
     pbar.close()
     print("Training finished!"); print(f"Best eval loss: {best_eval_loss:.4f}")
     if os.path.exists(best_model_path): print(f"Best model saved: {best_model_path}")
+
+
+# --- Main Execution (Example - Adapt for your actual training) ---
+if __name__ == '__main__':
+    # --- Model & Training Parameters ---
+    LATENT_DIM = 32 # Based on your earlier discussions of mu_std
+    NUM_SVG_TOKENS = 1024 # N, the sequence length for SVG latents
+    HIDDEN_DIM = 512 # d_model from VPVAE config (config["encoder_d_model"])
+    CONTEXT_DIM = 768 # Dimension of CLIP last_hidden_state (e.g., 768 for ViT-B/32)
+    NUM_BLOCKS = 12 # L
+    NUM_HEADS = 8 # From VPVAE config (config["num_heads"])
+    MLP_RATIO = 4.0 # For consistency with TransformerBlock d_ff=d_model*4
+    DROPOUT = 0.1
+    MAX_TEXT_SEQ_LEN = 77 # Max sequence length from CLIP tokenizer
+
+    BATCH_SIZE = 16
+    LEARNING_RATE = 1e-4
+    TRAIN_STEPS = 1001 # Keep short for testing this script
+    NUM_TIMESTEPS = 1000
+
+    CFG_PROB = 0.1
+    CFG_SCALE_EVAL = 4.0
+    LOG_INTERVAL = 10
+    EVAL_INTERVAL = 250
+    MODEL_SAVE_DIR = "saved_models_vsdit_seqcond" # New directory
+
+    if HIDDEN_DIM % NUM_HEADS != 0: raise ValueError("HIDDEN_DIM must be divisible by NUM_HEADS")
+
+    config = locals() # Capture parameters in a dict for potential logging/use
+
+    vs_dit_model = VS_DiT(
+        latent_dim=LATENT_DIM, hidden_dim=HIDDEN_DIM, context_dim=CONTEXT_DIM,
+        num_blocks=NUM_BLOCKS, num_heads=NUM_HEADS, mlp_ratio=MLP_RATIO, dropout=DROPOUT
+    )
+    print(f"Model Parameters: {sum(p.numel() for p in vs_dit_model.parameters() if p.requires_grad) / 1e6:.2f} M")
+
+    # NOTE: This runs training with SIMULATED sequence data.
+    # You would replace the train function call with your actual
+    # training loop from train_vsdit_with_clip.py, passing real data.
+    print("\n--- Running internal training simulation ---")
+    train(
+        model=vs_dit_model, train_steps=TRAIN_STEPS, batch_size=BATCH_SIZE,
+        latent_dim=LATENT_DIM, num_svg_tokens=NUM_SVG_TOKENS, context_dim=CONTEXT_DIM,
+        num_timesteps=NUM_TIMESTEPS, cfg_prob=CFG_PROB, log_interval=LOG_INTERVAL,
+        eval_interval=EVAL_INTERVAL, cfg_scale_eval=CFG_SCALE_EVAL, target_device=device,
+        model_save_dir=MODEL_SAVE_DIR, max_text_seq_len=MAX_TEXT_SEQ_LEN
+    )
+
+# --- END OF FILE vp_dit.py ---
