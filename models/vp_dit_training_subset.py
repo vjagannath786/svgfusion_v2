@@ -19,13 +19,13 @@ from pathlib import Path
 
 # Adjust sys.path for your project structure
 #sys.path.append("/home/svgfusion_v2/models/") # Example path
-sys.path.append(".") # Add current directory as well
+sys.path.append("/workspace/svgfusion_v2") # Add current directory as well
 
 # --- Import Model and Utils from vp_dit.py ---
 try:
     # --- MODIFIED: Ensure importing the correct classes for sequence conditioning ---
-    from vp_dit import VS_DiT, TimestepEmbedder, MLP, VS_DiT_Block # Included these for self-containment
-    from vp_dit import get_linear_noise_schedule, precompute_diffusion_parameters, noise_latent, ddim_sample
+    from models import VS_DiT, TimestepEmbedder, MLP, VS_DiT_Block # Included these for self-containment
+    from models import get_linear_noise_schedule, precompute_diffusion_parameters, noise_latent, ddim_sample
     print("Successfully imported VS_DiT model components and diffusion utilities.")
 except ImportError as e:
     print(f"Error importing from vp_dit.py: {e}")
@@ -57,7 +57,7 @@ except Exception as e:
      print(f"Error loading captions: {e}"); sys.exit(1)
 
 class zDataset(Dataset):
-    def __init__(self, z_file_list_path, mean_path='./z_mean_banana_overfit.pt', std_path='./z_std_banana_overfit.pt', filter_keywords=None):
+    def __init__(self, z_file_list_path, mean_path='./z_mean_apple_overfit.pt', std_path='./z_std_apple_overfit.pt', filter_keywords=None):
         # z_file_list_path points to the list of dicts: [{'path': str, 'text': str}, ...]
         print(f"Loading latent file list from: {z_file_list_path}")
         self.z_data_info = torch.load(z_file_list_path)
@@ -72,29 +72,54 @@ class zDataset(Dataset):
             #     if filter_keywords in os.path.basename(item['path']).lower() and 'circled-m' not in os.path.basename(item['path']).lower()
             #     and 'hollow' not in os.path.basename(item['path']).lower()
             # ]
-            self.z_data_info = [
-                item for item in self.z_data_info 
-                if any(keyword in os.path.basename(item['path']).lower() for keyword in filter_keywords) 
-                and 'circled-m' not in os.path.basename(item['path']).lower()
-                and 'hollow' not in os.path.basename(item['path']).lower()
-            ]
+            # self.z_data_info = [
+            #     item for item in self.z_data_info 
+            #     if any(keyword in os.path.basename(item['path']).lower() for keyword in filter_keywords) 
+            #     and 'circled-m' not in os.path.basename(item['path']).lower()
+            #     and 'hollow' not in os.path.basename(item['path']).lower()
+            # ]
             
-            print(f"Filtered dataset to {len(self.z_data_info)} samples containing 'circle,square, diamond'.")
-            # Debug: Print first few filenames
-            for i, item in enumerate(self.z_data_info[:5]):
-                print(f"  - {os.path.basename(item['path'])}")
-            print("----------------------")
+            # print(f"Filtered dataset to {len(self.z_data_info)} samples containing 'circle,square, banana'.")
+            # # Debug: Print first few filenames
+            # for i, item in enumerate(self.z_data_info[:5]):
+            #     print(f"  - {os.path.basename(item['path'])}")
+            # print("----------------------")
             
-            if len(self.z_data_info) == 0:
-                print("WARNING: Filtered dataset is empty! Check your keywords.")
-                sys.exit(1)
+            # if len(self.z_data_info) == 0:
+            #     print("WARNING: Filtered dataset is empty! Check your keywords.")
+            #     sys.exit(1)
             
-            # --- DATASET AUGMENTATION (REPETITION) ---
-            # The dataset is tiny (~9 samples). We repeat it 100x to ensure
-            # each batch has a good mix of colors and gradients are stable.
-            print(f"Augmenting dataset by repeating it 100 times...")
-            self.z_data_info = self.z_data_info * 10
-            print(f"New dataset size: {len(self.z_data_info)}")
+            # # --- DATASET AUGMENTATION (REPETITION) ---
+            # # The dataset is tiny (~9 samples). We repeat it 100x to ensure
+            # # each batch has a good mix of colors and gradients are stable.
+            # print(f"Augmenting dataset by repeating it 100 times...")
+            # self.z_data_info = self.z_data_info * 100
+            # print(f"New dataset size: {len(self.z_data_info)}")
+            # 1. Separate by class
+            circles = [x for x in self.z_data_info if 'circle' in os.path.basename(x['path']).lower()]
+            squares = [x for x in self.z_data_info if 'square' in os.path.basename(x['path']).lower()]
+            red_apple = [x for x in self.z_data_info if 'red-apple' in os.path.basename(x['path']).lower()]
+            green_apple = [x for x in self.z_data_info if 'green-apple' in os.path.basename(x['path']).lower()]
+            
+            print(f"Original counts: Circle={len(circles)}, Square={len(squares)}, RedApple={len(red_apple)}, GreenApple={len(green_apple)}")
+
+            # 2. Target count per class (e.g., 2000 samples each)
+            TARGET_PER_CLASS = 2000
+            
+            # 3. Oversample (Sample with replacement)
+            import random
+            circles_bal = random.choices(circles, k=500)
+            squares_bal = random.choices(squares, k=500)
+            red_apple_bal = random.choices(red_apple, k=TARGET_PER_CLASS)
+            green_apple_bal = random.choices(green_apple, k=TARGET_PER_CLASS)
+            
+            
+            
+            # 4. Combine
+            self.z_data_info = circles_bal + squares_bal + red_apple_bal + green_apple_bal
+            random.shuffle(self.z_data_info) # Shuffle so batch isn't just one type
+            
+            print(f"Final Balanced Size: {len(self.z_data_info)} (1000 per class)")
 
         # --- Load pre-calculated mean and std ---
         # if not (os.path.exists(mean_path) and os.path.exists(std_path)):
@@ -198,6 +223,11 @@ class zDataset(Dataset):
             elif "brown" in filename: text = "a brown diamond"
         elif "banana" in filename:
             text = "A ripe yellow banana with the peel pulled back to reveal the fruit. The banana has a green stem and a small brown tip, designed in a simple flat style."
+        elif "apple" in filename:
+            if "red" in filename:
+                text = "A red apple with green leaf and brown stem"
+            elif "green" in filename:
+                text = "A green apple with green leaf and brown stem"
         
         return {'z': z, 'text': text, 'filename': filename}
 
@@ -275,9 +305,9 @@ if __name__ == "__main__":
     initial_config = {
         # Training Params
         "learning_rate": 3e-4,
-        "total_steps": 10000,
+        "total_steps": 50000,
         "batch_size": 8,
-        "warmup_steps": 300,
+        "warmup_steps": 500,
         "lr_decay_min": 1e-6,
         "weight_decay": 1e-4,
         "log_interval": 20,
@@ -296,7 +326,7 @@ if __name__ == "__main__":
         "num_blocks": 12,         # Increased from 1 to 4
         "num_heads": 6,           # Increased from 2 to 8 (512/8 = 64 dim per head)
         "mlp_ratio": 4.0,         # MLP expansion ratio (d_ff = hidden_dim * mlp_ratio)
-        "dropout": 0.2,           # Disable dropout for overfitting
+        "dropout": 0.3,           # Disable dropout for overfitting
         "cfg_dropout_prob": 0.1, # Disable CFG dropout for overfitting
 
         # Diffusion Params
@@ -312,7 +342,7 @@ if __name__ == "__main__":
         "output_model_dir": "saved_models_vsdit_square_overfit", # New directory for square overfit
         
         # --- SUBSET FILTERING ---
-        "filter_keywords": ["circle", "square", "banana"] # Target SPECIFIC single square
+        "filter_keywords": ["circle", "square", "red-apple","green-apple"] # Target SPECIFIC single square
     }
 
     # --- Setup Device ---
@@ -372,8 +402,8 @@ if __name__ == "__main__":
                                        description='Source code for VP-DIT training run',
                                        metadata=dict(config))
         # Add relevant script files
-        code_artifact.add_file('./models/vp_dit_v1.py')
-        code_artifact.add_file('./models/vp_dit_training_subset.py') # Log this file
+        code_artifact.add_file('/workspace/svgfusion_v2/models/vp_dit_v1.py')
+        code_artifact.add_file('/workspace/svgfusion_v2/models/vp_dit_training_subset.py') # Log this file
         # Add other relevant scripts if needed (e.g., dataset_preparation_dynamic.py, prepare_latents.py)
         run.log_artifact(code_artifact)
         print("Logged source code as WandB artifact.")
