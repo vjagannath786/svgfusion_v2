@@ -152,16 +152,15 @@ class VPVAEEncoder(nn.Module):
         for layer in self.self_attention_layers: 
             x = layer(x, padding_mask=svg_padding_mask) # Self-attn over SVG sequence, masking padded SVG tokens
         
-        # Output mu and log_var for each token in the SVG sequence
-        mu = self.fc_mu(x)       # [B, L_svg, latent_dim]
-        log_var = self.fc_var(x) # [B, L_svg, latent_dim]
-
-        # Optional: zero out padding positions in μ and log_var
+        # Masked mean pool over sequence → single vector per sample [B, d_model]
         if svg_padding_mask is not None:
             valid_mask = (~svg_padding_mask).unsqueeze(-1).float()  # [B, L_svg, 1]
-            mu = mu * valid_mask
-            log_var = log_var * valid_mask
-        
+            pooled = (x * valid_mask).sum(dim=1) / (valid_mask.sum(dim=1) + 1e-9)
+        else:
+            pooled = x.mean(dim=1)  # [B, d_model]
+
+        mu = self.fc_mu(pooled)       # [B, latent_dim]
+        log_var = self.fc_var(pooled) # [B, latent_dim]
         return mu, log_var
 
 class VPVAEDecoder(nn.Module):
@@ -182,14 +181,15 @@ class VPVAEDecoder(nn.Module):
         ])
 
     def forward(self, z, target_len):
-        # z: [B, L_svg, latent_dim] (from encoder)
-        x=self.fc_latent(z) # [B, L_svg, d_model]
+        # z: [B, latent_dim] — single pooled vector per sample (scalar latent)
+        effective_len = min(target_len, self.max_seq_len)
+        # Project then broadcast across target sequence length
+        x = self.fc_latent(z).unsqueeze(1).expand(-1, effective_len, -1)  # [B, effective_len, d_model]
 
-        # Apply RoPE to the decoder input if desired
-        x_rope = apply_rope(x) # [B, L_svg, d_model]
+        x_rope = apply_rope(x)  # [B, effective_len, d_model]
 
-        for layer in self.decoder_layers: 
-            x_rope=layer(x_rope, padding_mask=None) # No padding mask here, assuming Z is already padded/masked from encoder's output
+        for layer in self.decoder_layers:
+            x_rope = layer(x_rope, padding_mask=None)
         x_normed=self.decoder_norm(x_rope)
         
         element_type_logits = self.element_type_head(x_normed)
@@ -226,8 +226,9 @@ class VPVAE(nn.Module):
         return z
     
     def forward(self, svg_matrix_hybrid, pixel_embedding, svg_padding_mask=None, pixel_padding_mask=None):
-        mu,logvar=self.encoder(svg_matrix_hybrid, pixel_embedding, svg_padding_mask, pixel_padding_mask)
-        z=self.reparameterize(mu, logvar)
+        # mu, logvar: [B, latent_dim]  (single pooled vector — paper's scalar latent)
+        mu, logvar = self.encoder(svg_matrix_hybrid, pixel_embedding, svg_padding_mask, pixel_padding_mask)
+        z = self.reparameterize(mu, logvar)           # [B, latent_dim]
         element_logits, command_logits, continuous_params_pred = self.decoder(z, target_len=self.max_seq_len)
         return element_logits, command_logits, continuous_params_pred, mu, logvar
 
@@ -238,7 +239,7 @@ def vp_vae_hybrid_loss(
     element_pad_idx=0, command_pad_idx=0, 
     svg_padding_mask=None, kl_weight=0.1, 
     ce_elem_loss_weight=1.0, ce_cmd_loss_weight=1.0, mse_cont_loss_weight=1.0, num_bins=256,num_params = 12, # num_params now correctly inferred from data
-    free_bits = 4.0
+    free_bits = 0.0
 ):
     batch_size, target_len_out, _ = element_logits.shape 
     _, target_len_svg, _ = target_svg_matrix_hybrid.shape
@@ -298,16 +299,11 @@ def vp_vae_hybrid_loss(
 
     avg_param_ce_loss = total_param_ce_loss / num_valid_param_losses if num_valid_param_losses > 0 else torch.tensor(0.0).to(command_logits.device)
     
-    # KL Divergence for VAE
-    kl_div = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
-    kl_div = torch.mean(kl_div, dim=-1) # Average over latent_dim to get [B, L_svg]
-    kl_div_thresholded = torch.max(kl_div - free_bits, torch.zeros_like(kl_div))  # Per-token threshold
-    
-    if svg_padding_mask is not None:
-        mask = (~svg_padding_mask[:, :effective_len]).float()  # [B, L_svg]
-        kl_loss = (kl_div_thresholded[:, :effective_len] * mask).sum() / (mask.sum() + 1e-9)
-    else:
-        kl_loss = kl_div_thresholded.mean()
+    # KL Divergence — mu/logvar are [B, latent_dim] (scalar pooled latent)
+    # No padding mask needed here: latent is a single vector per sample, not per-token
+    kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # [B, latent_dim]
+    kl_div_thresholded = torch.clamp(kl_per_dim, min=free_bits)   # free_bits per latent dim
+    kl_loss = kl_div_thresholded.mean()
     
     total_loss = (ce_elem_loss_weight * ce_loss_elem +
                   ce_cmd_loss_weight * ce_loss_cmd +
@@ -339,7 +335,7 @@ def main():
 
     # --- CONFIGURATION (Adjust paths as necessary) ---
     PRECOMPUTED_DATA_OUTPUT_DIR = "./datasets/precomputed_patch_tokens_data/" 
-    PRECOMPUTED_FILE_LIST_PATH = "./datasets/precomputed_patch_tokens_file_list.pt" 
+    PRECOMPUTED_FILE_LIST_PATH = "./datasets/precomputed_patch_tokens_file_list.pt"  # rebuilt with correct paths
     
     DATASET_FILE_LIST = PRECOMPUTED_FILE_LIST_PATH 
     # --- END CONFIGURATION ---
@@ -355,23 +351,15 @@ def main():
     except Exception as e:
         if accelerator.is_main_process: print(f"Error loading file paths from '{DATASET_FILE_LIST}': {e}"); traceback.print_exc(); sys.exit(1)
 
-    # --- Determine dimensions from DINOv2 model and actual precomputed SVG data ---
-    # Load DINOv2 briefly to get its output dimensions for model config
-    _, _, _, dino_embed_dim_from_data, fixed_dino_patch_seq_length = load_dino_model_components()
-    
-    # Load one actual precomputed data item to determine SVG tensor dimensions reliably
-    if not precomputed_file_paths:
-        if accelerator.is_main_process: print("Error: No precomputed SVG files found to infer SVG dimensions from."); sys.exit(1)
-    
-    try:
-        # Load the first actual precomputed data item to infer the dimensions
-        #first_precomputed_item_data = torch.load(precomputed_file_paths[0])
-        #num_total_svg_features_from_data = first_precomputed_item_data['full_svg_matrix_content'].shape[1]
-        num_total_svg_features_from_data = 14
-        # num_other_continuous_features is the number of continuous columns AFTER elem_id and cmd_id
-        num_other_continuous_features = 12 
-    except Exception as e:
-        if accelerator.is_main_process: print(f"Error loading first precomputed item to infer SVG dimensions: {e}"); traceback.print_exc(); sys.exit(1)
+    # --- Determine dimensions from precomputed data (constants for dinov2-small) ---
+    # dinov2-small: embed_dim=384, patch_seq_length=257 (1 CLS + 16×16 patches at 224×224)
+    dino_embed_dim_from_data = 384
+    fixed_dino_patch_seq_length = 257
+
+    # SVG tensor: 14 cols = [elem_type, cmd_type, geom×8, fill_RGB×3, seq_idx×1]
+    # 2 categorical header cols + 12 continuous params
+    num_total_svg_features_from_data = 14
+    num_other_continuous_features = 12
 
     # Get vocab sizes for categorical features from SVGToTensor_Normalized
     temp_converter = SVGToTensor_Normalized() # This instance is only used for vocabs, not for getting dynamic parameter counts
